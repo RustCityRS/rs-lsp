@@ -22,9 +22,9 @@ dependencies {
         if (localIde.exists()) {
             local(localIde.absolutePath)
         } else {
-            intellijIdeaCommunity("2024.2")
+            intellijIdeaCommunity("2025.3")
         }
-        bundledPlugin("com.intellij.platform.lsp")
+        bundledPlugin("com.intellij.modules.lsp")
     }
 }
 
