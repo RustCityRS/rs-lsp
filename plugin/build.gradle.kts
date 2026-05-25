@@ -25,14 +25,7 @@ dependencies {
         } else {
             intellijIdea("2025.3")
         }
-    }
-}
-
-// Spellchecker API (bundled with the IDE)
-val spellcheckerJar = file("C:/Program Files/JetBrains/RustRover 2026.1.1/lib/intellij.spellchecker.jar")
-if (spellcheckerJar.exists()) {
-    dependencies {
-        compileOnly(files(spellcheckerJar))
+        bundledModule("intellij.spellchecker")
     }
 }
 
