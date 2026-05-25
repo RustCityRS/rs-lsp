@@ -28,11 +28,11 @@ class Rs2Lexer : LexerBase() {
             "def_char", "def_spotanim", "def_long", "def_npc_stat", "def_fontmetrics",
             "def_model", "def_idk", "def_midi", "def_jingle", "def_npc_mode",
             "def_locshape", "def_overlayinterface", "def_dbcolumn", "def_controller",
-            "int", "string", "boolean", "coord", "long", "char"
+            "int", "string", "boolean", "long", "char"
         )
         // Overloaded type names — only highlighted as types when in a type position (followed by $)
         private val BARE_TYPE_KEYWORDS = setOf(
-            "obj", "npc", "loc", "namedobj", "component", "interface", "inv",
+            "obj", "npc", "loc", "namedobj", "component", "interface", "inv", "coord",
             "enum", "stat", "seq", "synth", "category", "struct", "dbrow",
             "dbtable", "param", "hunt", "spotanim", "npc_stat", "fontmetrics",
             "model", "idk", "midi", "jingle", "npc_mode", "locshape",
