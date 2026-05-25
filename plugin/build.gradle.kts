@@ -24,6 +24,7 @@ dependencies {
         } else {
             intellijIdeaCommunity("2024.2")
         }
+        bundledPlugin("com.intellij.platform.lsp")
     }
 }
 
@@ -43,16 +44,6 @@ tasks {
     patchPluginXml {
         sinceBuild.set("242")
         untilBuild.set("262.*")
-    }
-
-    // Include bundled binaries in the plugin resources (if present)
-    processResources {
-        val binDir = file("src/main/resources/bin")
-        if (binDir.exists()) {
-            from(binDir) {
-                into("bin")
-            }
-        }
     }
 
     publishPlugin {
