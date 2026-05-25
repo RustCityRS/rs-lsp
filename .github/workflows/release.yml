@@ -79,6 +79,8 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
+      - uses: gradle/actions/setup-gradle@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: rs-lsp-x86_64-pc-windows-msvc.exe
@@ -150,6 +152,8 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
 
       - uses: actions/download-artifact@v4
         with:
