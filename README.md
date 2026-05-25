@@ -28,6 +28,8 @@ Full syntax-aware highlighting that follows your IDE's color theme:
 Entity references are resolved from `.pack` files — the highlighter knows that `bronze_axe` is an `obj`, `man` is an
 `npc`, and `prayer` is a `stat`.
 
+<img width="1200" height="760" alt="Screenshot_5" src="https://github.com/user-attachments/assets/dff093dd-7238-46cd-bc09-8be155860f10" />
+
 ### Diagnostics
 
 Real-time error checking powered by the [rs-runec](https://crates.io/crates/rs-runec) compiler:
@@ -61,6 +63,8 @@ Real-time error checking powered by the [rs-runec](https://crates.io/crates/rs-r
                     └─────────────┘
 ```
 
+<img width="1200" height="760" alt="Screenshot_8" src="https://github.com/user-attachments/assets/9003ef88-97a6-49f7-bcbc-0cfc9f7eb756" />
+
 ### Code Completion
 
 Context-aware suggestions that auto-popup as you type:
@@ -84,6 +88,8 @@ Context-aware suggestions that auto-popup as you type:
 Argument-position completions read parameter types from `engine.rs2` (for commands) and from `[proc,...]`/`[label,...]`
 declarations (for scripts), then filter suggestions to only show entities of the expected type.
 
+<img width="1200" height="760" alt="Screenshot_7" src="https://github.com/user-attachments/assets/0ee40108-3eb2-48cd-b3b8-dccc421c80e9" />
+
 ### Go to Definition
 
 **Ctrl+click** any symbol to jump to its definition:
@@ -102,6 +108,8 @@ declarations (for scripts), then filter suggestions to only show entities of the
 **Ctrl+click** a definition to find all references across the project. Whole-word matching ensures `inv` doesn't match
 `inv_del`.
 
+<img width="1200" height="760" alt="Screenshot_9" src="https://github.com/user-attachments/assets/64a85406-2d8a-4cc9-bd77-faa09df6645c" />
+
 ### Rename Refactoring
 
 **Shift+F6** to rename any symbol across the entire project:
@@ -112,6 +120,8 @@ declarations (for scripts), then filter suggestions to only show entities of the
 - **Constants**: Updates all `.rs2` files + `.constant` files
 - **Game variables**: Updates `%name` references across all `.rs2` files
 - **Local variables**: Updates `$name` within the current file
+
+<img width="505" height="364" alt="Screenshot_10" src="https://github.com/user-attachments/assets/b3c5a7ee-ee25-4f23-8c69-8f9ba3c84eb1" />
 
 ### Extract Proc
 
