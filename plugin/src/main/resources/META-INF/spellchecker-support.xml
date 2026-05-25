@@ -1,0 +1,7 @@
+<idea-plugin>
+    <extensions defaultExtensionNs="com.intellij">
+        <spellchecker.support
+                language="RS2"
+                implementationClass="rs2.lsp.Rs2SpellcheckingStrategy"/>
+    </extensions>
+</idea-plugin>

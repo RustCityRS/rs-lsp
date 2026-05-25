@@ -1,0 +1,188 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-lsp:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            ext: .exe
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            ext: .exe
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            ext: ""
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            ext: ""
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            ext: ""
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            ext: ""
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build LSP binary
+        shell: bash
+        run: |
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          fi
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename binary
+        shell: bash
+        run: |
+          artifact="rs-lsp-${{ matrix.target }}${{ matrix.ext }}"
+          cp "target/${{ matrix.target }}/release/rs-lsp${{ matrix.ext }}" "$artifact"
+          if [[ "${{ matrix.ext }}" == "" ]]; then
+            chmod +x "$artifact"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rs-lsp-${{ matrix.target }}${{ matrix.ext }}
+          path: rs-lsp-${{ matrix.target }}${{ matrix.ext }}
+
+  build-plugin:
+    needs: build-lsp
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rs-lsp-x86_64-pc-windows-msvc.exe
+          path: plugin/src/main/resources/bin/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rs-lsp-aarch64-pc-windows-msvc.exe
+          path: plugin/src/main/resources/bin/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rs-lsp-x86_64-unknown-linux-gnu
+          path: plugin/src/main/resources/bin/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rs-lsp-aarch64-unknown-linux-gnu
+          path: plugin/src/main/resources/bin/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rs-lsp-x86_64-apple-darwin
+          path: plugin/src/main/resources/bin/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rs-lsp-aarch64-apple-darwin
+          path: plugin/src/main/resources/bin/
+
+      - name: Build plugin
+        working-directory: plugin
+        run: ./gradlew buildPlugin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rs-lsp-plugin
+          path: plugin/build/distributions/*.zip
+
+  release:
+    needs: [build-lsp, build-plugin]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/rs-lsp-x86_64-pc-windows-msvc.exe/*
+            artifacts/rs-lsp-aarch64-pc-windows-msvc.exe/*
+            artifacts/rs-lsp-x86_64-unknown-linux-gnu/*
+            artifacts/rs-lsp-aarch64-unknown-linux-gnu/*
+            artifacts/rs-lsp-x86_64-apple-darwin/*
+            artifacts/rs-lsp-aarch64-apple-darwin/*
+            artifacts/rs-lsp-plugin/*
+          generate_release_notes: true
+
+  publish-plugin:
+    needs: build-plugin
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rs-lsp-x86_64-pc-windows-msvc.exe
+          path: plugin/src/main/resources/bin/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rs-lsp-aarch64-pc-windows-msvc.exe
+          path: plugin/src/main/resources/bin/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rs-lsp-x86_64-unknown-linux-gnu
+          path: plugin/src/main/resources/bin/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rs-lsp-aarch64-unknown-linux-gnu
+          path: plugin/src/main/resources/bin/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rs-lsp-x86_64-apple-darwin
+          path: plugin/src/main/resources/bin/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rs-lsp-aarch64-apple-darwin
+          path: plugin/src/main/resources/bin/
+
+      - name: Publish to JetBrains Marketplace
+        working-directory: plugin
+        env:
+          PUBLISH_TOKEN: ${{ secrets.JETBRAINS_MARKETPLACE_TOKEN }}
+        run: ./gradlew publishPlugin

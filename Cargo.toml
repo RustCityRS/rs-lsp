@@ -1,0 +1,22 @@
+[package]
+name = "rs-lsp"
+version = "0.1.0"
+edition = "2024"
+authors = ["RustCityRS"]
+description = "A Language Server (LSP) and JetBrains IDE Plugin for RuneScript 2"
+license = "MIT"
+repository = "https://github.com/RustCityRS/rs-lsp"
+homepage = "https://github.com/RustCityRS/rs-lsp"
+readme = "README.md"
+
+[[bin]]
+name = "rs-lsp"
+path = "src/main.rs"
+
+[dependencies]
+tower-lsp = "0.20"
+tokio = { version = "1.52", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rs-runec = "0.1"
+dashmap = "6"

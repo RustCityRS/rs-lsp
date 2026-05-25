@@ -1,0 +1,75 @@
+<idea-plugin>
+    <id>rs2.lsp.rs-lsp-plugin</id>
+    <name>RS2 Language Support</name>
+    <vendor>rs-server</vendor>
+    <description><![CDATA[
+        Language support for .rs2 files via the rs-lsp language server.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <fileType
+                name="RS2"
+                implementationClass="rs2.lsp.Rs2FileType"
+                fieldName="INSTANCE"
+                language="RS2"
+                extensions="rs2"/>
+
+        <lang.parserDefinition
+                language="RS2"
+                implementationClass="rs2.lsp.Rs2ParserDefinition"/>
+
+        <lang.syntaxHighlighterFactory
+                language="RS2"
+                implementationClass="rs2.lsp.Rs2SyntaxHighlighterFactory"/>
+
+        <platform.lsp.serverSupportProvider
+                implementation="rs2.lsp.Rs2LspServerSupportProvider"/>
+
+        <annotator
+                language="RS2"
+                implementationClass="rs2.lsp.Rs2Annotator"/>
+
+        <gotoDeclarationHandler
+                implementation="rs2.lsp.Rs2GotoDeclarationHandler"/>
+
+        <renameHandler
+                implementation="rs2.lsp.Rs2RenameHandler"/>
+
+        <completion.contributor
+                language="RS2"
+                implementationClass="rs2.lsp.Rs2CompletionContributor"/>
+
+        <lang.inspectionSuppressor
+                language="RS2"
+                implementationClass="rs2.lsp.Rs2InspectionSuppressor"/>
+
+        <spellchecker.support
+                language="RS2"
+                implementationClass="rs2.lsp.Rs2SpellcheckingStrategy"/>
+
+        <additionalTextAttributes scheme="Darcula" file="colorSchemes/Rs2Default.xml"/>
+        <additionalTextAttributes scheme="Dark" file="colorSchemes/Rs2Default.xml"/>
+
+        <postStartupActivity implementation="rs2.lsp.Rs2StartupActivity"/>
+
+        <notificationGroup id="RS2 LSP"
+                           displayType="BALLOON"/>
+    </extensions>
+
+    <applicationListeners>
+        <listener class="rs2.lsp.Rs2FileChangeListener"
+                  topic="com.intellij.openapi.command.CommandListener"/>
+    </applicationListeners>
+
+    <actions>
+        <action id="rs2.ExtractProc"
+                class="rs2.lsp.Rs2ExtractProcAction"
+                text="Extract RS2 Proc"
+                description="Extract selected code into a new RS2 proc">
+            <add-to-group group-id="RefactoringMenu" anchor="last"/>
+            <keyboard-shortcut keymap="$default" first-keystroke="ctrl alt M"/>
+        </action>
+    </actions>
+</idea-plugin>

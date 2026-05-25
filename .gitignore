@@ -1,0 +1,21 @@
+# Rust
+/target/
+Cargo.lock
+
+# JetBrains Plugin
+plugin/.gradle/
+plugin/.intellijPlatform/
+plugin/.kotlin/
+plugin/build/
+plugin/gradle/wrapper/gradle-wrapper.jar
+plugin/src/main/resources/bin/
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# OS
+.DS_Store
+Thumbs.db

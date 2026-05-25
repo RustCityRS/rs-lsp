@@ -1,0 +1,56 @@
+<scheme name="RS2 Defaults" version="142" parent_scheme="Darcula">
+    <attributes>
+        <option name="RS2_TRIGGER_BRACKET">
+            <value>
+                <option name="FOREGROUND" value="ffc66d"/>
+            </value>
+        </option>
+        <option name="RS2_TRIGGER_TYPE">
+            <value>
+                <option name="FOREGROUND" value="ffc66d"/>
+            </value>
+        </option>
+        <option name="RS2_PROC_CALL">
+            <value>
+                <option name="FOREGROUND" value="569cd6"/>
+            </value>
+        </option>
+        <option name="RS2_JUMP_CALL">
+            <value>
+                <option name="FOREGROUND" value="569cd6"/>
+            </value>
+        </option>
+        <option name="RS2_CONSTANT">
+            <value>
+                <option name="FOREGROUND" value="be84d1"/>
+                <option name="FONT_TYPE" value="2"/>
+            </value>
+        </option>
+        <option name="RS2_GAME_VAR">
+            <value>
+                <option name="FOREGROUND" value="be84d1"/>
+                <option name="FONT_TYPE" value="2"/>
+            </value>
+        </option>
+        <option name="RS2_TRIGGER_SUBJECT">
+            <value>
+                <option name="FOREGROUND" value="be84d1"/>
+            </value>
+        </option>
+        <option name="RS2_TRIGGER_SCRIPT_NAME">
+            <value>
+                <option name="FOREGROUND" value="569cd6"/>
+            </value>
+        </option>
+        <option name="RS2_COMMAND">
+            <value>
+                <option name="FOREGROUND" value="ffc66d"/>
+            </value>
+        </option>
+        <option name="RS2_ENTITY">
+            <value>
+                <option name="FOREGROUND" value="be84d1"/>
+            </value>
+        </option>
+    </attributes>
+</scheme>
