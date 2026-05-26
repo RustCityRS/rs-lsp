@@ -1,4 +1,4 @@
-<idea-plugin>
+<idea-plugin require-restart="true">
     <id>rs2.lsp.rs-lsp-plugin</id>
     <name>RS2 Language Support</name>
     <vendor>rs-server</vendor>
