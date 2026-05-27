@@ -18,5 +18,5 @@ tower-lsp = "0.20"
 tokio = { version = "1.52", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rs-runec = "0.1"
+rs-runec = { path = "../rs-compiler" }
 dashmap = "6"

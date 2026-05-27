@@ -56,6 +56,14 @@
 
         <notificationGroup id="RS2 LSP"
                            displayType="BALLOON"/>
+
+        <configurationType implementation="rs2.lsp.Rs2TestRunConfigurationType"/>
+
+        <runConfigurationProducer implementation="rs2.lsp.Rs2TestRunConfigurationProducer"/>
+
+        <runLineMarkerContributor
+                language="RS2"
+                implementationClass="rs2.lsp.Rs2TestLineMarkerProvider"/>
     </extensions>
 
     <applicationListeners>
