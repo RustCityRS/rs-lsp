@@ -60,7 +60,7 @@ Strings are split at `<>` boundaries into separate tokens. Inside interpolation 
 Entity names containing `+` (like `premade_cheese+tom_batta`) are fully supported across highlighting,
 navigation, and rename.
 
-<img width="1200" height="760" alt="Screenshot_5" src="https://github.com/user-attachments/assets/dff093dd-7238-46cd-bc09-8be155860f10" />
+<img width="1200" height="760" alt="Screenshot_11" src="https://github.com/user-attachments/assets/9ae68fbd-3ed0-4cf9-b8d7-68559643511c" />
 
 ---
 
@@ -94,9 +94,10 @@ settimer(general_macro_events, 500);
 ```
 
 Entity configs are read from `.obj`, `.npc`, `.inv`, `.loc`, and other config files in `content/scripts/`.
-Both `obj` and `namedobj` types resolve to `.obj` config files. Interface entities use `.if` extension.
 
-Hover is disabled inside string literals (except for interpolation tokens inside `<>`).
+<img width="1200" height="760" alt="Screenshot_12" src="https://github.com/user-attachments/assets/b836dd70-aeac-470d-99c8-eaeee2b10126" />
+
+<img width="826" height="354" alt="Screenshot_15" src="https://github.com/user-attachments/assets/383a17f1-e729-4186-910e-c9243b9da9a8" />
 
 ---
 
@@ -118,6 +119,8 @@ queue(queue: fluffs_complete, delay: 0, arg: 0)
 - Hints appear instantly on file open (plugin-native, no LSP startup delay)
 - Hints are disabled for `engine.rs2` (declaration file, not usage)
 - Hints skip string literals and comments
+
+<img width="696" height="334" alt="Screenshot_14" src="https://github.com/user-attachments/assets/18e35a28-a2a7-4ba5-88a6-d58a98890032" />
 
 ---
 
@@ -164,6 +167,8 @@ without saving. The LSP tracks script definitions per-file and rebuilds the symb
 ```
 
 <img width="1200" height="760" alt="Screenshot_8" src="https://github.com/user-attachments/assets/9003ef88-97a6-49f7-bcbc-0cfc9f7eb756" />
+
+<img width="604" height="256" alt="Screenshot_16" src="https://github.com/user-attachments/assets/0e27ad93-0c72-4625-8d03-9d6b9cf1e784" />
 
 ---
 
@@ -245,7 +250,9 @@ context. Uses IntelliJ's native Find Usages infrastructure:
 
 The rich popup shows all `~name` and `@name` call sites across `content/scripts/`, grouped by file with code previews.
 
-<img width="1200" height="760" alt="Screenshot_9" src="https://github.com/user-attachments/assets/64a85406-2d8a-4cc9-bd77-faa09df6645c" />
+<img width="930" height="403" alt="Screenshot_13" src="https://github.com/user-attachments/assets/eceba301-b0ea-4492-9a21-a36608e9bea6" />
+
+<img width="935" height="557" alt="Screenshot_17" src="https://github.com/user-attachments/assets/e571678c-e17b-48c6-9870-3f82e65a48c9" />
 
 ---
 
@@ -270,7 +277,7 @@ The rich popup shows all `~name` and `@name` call sites across `content/scripts/
 - Works correctly with text selection (uses selection start, not caret end)
 - Modified files are saved and editors refreshed after rename
 
-<img width="505" height="364" alt="Screenshot_10" src="https://github.com/user-attachments/assets/b3c5a7ee-ee25-4f23-8c69-8f9ba3c84eb1" />
+<img width="894" height="539" alt="Screenshot_18" src="https://github.com/user-attachments/assets/86107ca7-f165-470b-b613-0b8cc61f1dc0" />
 
 ---
 
