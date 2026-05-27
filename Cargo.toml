@@ -1,6 +1,6 @@
 [package]
 name = "rs-lsp"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 authors = ["RustCityRS"]
 description = "A Language Server (LSP) and JetBrains IDE Plugin for RuneScript 2"
