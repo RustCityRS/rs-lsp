@@ -25,7 +25,7 @@ object Rs2LspBinaryManager {
         "rs-lsp-$target$ext"
     }
 
-    private val EXECUTABLE_NAME = when {
+    val EXECUTABLE_NAME = when {
         System.getProperty("os.name").lowercase().contains("win") -> "rs-lsp.exe"
         else -> "rs-lsp"
     }
@@ -37,11 +37,7 @@ object Rs2LspBinaryManager {
     fun getOrExtractBinary(): String {
         val installDir = getInstallDir()
         val binaryPath = installDir.resolve(EXECUTABLE_NAME)
-
-        if (binaryPath.toFile().exists()) {
-            return binaryPath.toString()
-        }
-
+        if (binaryPath.toFile().exists()) return binaryPath.toString()
         return extractBundledBinary() ?: EXECUTABLE_NAME
     }
 

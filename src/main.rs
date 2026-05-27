@@ -46,15 +46,20 @@ struct DefinitionLocation {
 
 type DefIndex = std::collections::HashMap<String, DefinitionLocation>;
 
-#[derive(Debug)]
+type ParamNameIndex = std::collections::HashMap<String, Vec<String>>;
+type FileScriptsIndex = std::collections::HashMap<String, Vec<String>>;
+
 struct Backend {
     client: Client,
     documents: Arc<DashMap<Url, String>>,
     registry: Arc<RwLock<Option<SymbolRegistry>>>,
+    base_registry: Arc<RwLock<Option<SymbolRegistry>>>,
     scripts_dir: Arc<RwLock<Option<PathBuf>>>,
     all_compiled: Arc<RwLock<Vec<CompiledScript>>>,
     all_sources: Arc<RwLock<std::collections::HashMap<String, String>>>,
     definitions: Arc<RwLock<DefIndex>>,
+    param_names: Arc<RwLock<ParamNameIndex>>,
+    file_scripts: Arc<RwLock<FileScriptsIndex>>,
     change_version: Arc<AtomicU64>,
     fast_diagnostics: Arc<DashMap<Url, Vec<Diagnostic>>>,
 }
@@ -65,13 +70,57 @@ impl Backend {
             client,
             documents: Arc::new(DashMap::new()),
             registry: Arc::new(RwLock::new(None)),
+            base_registry: Arc::new(RwLock::new(None)),
             scripts_dir: Arc::new(RwLock::new(None)),
             all_compiled: Arc::new(RwLock::new(Vec::new())),
             all_sources: Arc::new(RwLock::new(std::collections::HashMap::new())),
             definitions: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            param_names: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            file_scripts: Arc::new(RwLock::new(std::collections::HashMap::new())),
             change_version: Arc::new(AtomicU64::new(0)),
             fast_diagnostics: Arc::new(DashMap::new()),
         }
+    }
+
+    async fn find_script_call_sites(&self, name: &str) -> Vec<Location> {
+        let sources = self.all_sources.read().await;
+        let mut locations = Vec::new();
+        let patterns = [format!("~{}", name), format!("@{}", name)];
+        for (path_str, source) in sources.iter() {
+            let path = PathBuf::from(path_str);
+            let Ok(file_uri) = Url::from_file_path(&path) else {
+                continue;
+            };
+            for (line_num, line) in source.lines().enumerate() {
+                for pattern in &patterns {
+                    let mut start = 0;
+                    while let Some(idx) = line[start..].find(pattern.as_str()) {
+                        let col = start + idx;
+                        let after_idx = col + pattern.len();
+                        let after_ok = after_idx >= line.len()
+                            || !line.as_bytes()[after_idx].is_ascii_alphanumeric()
+                                && line.as_bytes()[after_idx] != b'_';
+                        if after_ok {
+                            locations.push(Location {
+                                uri: file_uri.clone(),
+                                range: Range {
+                                    start: Position {
+                                        line: line_num as u32,
+                                        character: col as u32,
+                                    },
+                                    end: Position {
+                                        line: line_num as u32,
+                                        character: (col + pattern.len()) as u32,
+                                    },
+                                },
+                            });
+                        }
+                        start = col + pattern.len();
+                    }
+                }
+            }
+        }
+        locations
     }
 
     async fn diagnose(&self, uri: &Url, text: &str) {
@@ -121,6 +170,63 @@ impl Backend {
             }
         };
 
+        // Track script names per file and detect removals
+        let file_key = file_path.to_string_lossy().to_string();
+        let new_script_names: Vec<String> = file
+            .scripts
+            .iter()
+            .filter(|s| s.trigger != "command")
+            .map(|s| s.name.clone())
+            .collect();
+
+        let needs_rebuild = {
+            let fs = self.file_scripts.read().await;
+            if let Some(old_names) = fs.get(&file_key) {
+                old_names.iter().any(|n| !new_script_names.contains(n))
+            } else {
+                false
+            }
+        };
+
+        if needs_rebuild {
+            // A script was removed/renamed — clone base registry and re-add all scripts
+            let base = self.base_registry.read().await;
+            if let Some(ref base_reg) = *base {
+                let mut new_registry = base_reg.clone();
+                let sources = self.all_sources.read().await;
+                for (path_str, source) in sources.iter() {
+                    let p = PathBuf::from(path_str);
+                    let mut lx = Lexer::new(source, &p);
+                    if let Ok(toks) = lx.tokenize() {
+                        let mut pr = Parser::new(toks, &p);
+                        if let Ok(f) = pr.parse() {
+                            for s in &f.scripts {
+                                if s.trigger == "command" {
+                                    continue;
+                                }
+                                let pt = s.params.iter().map(|p| p.param_type).collect();
+                                new_registry.register_script(
+                                    s.name.clone(),
+                                    s.trigger.clone(),
+                                    pt,
+                                    s.return_types.clone(),
+                                );
+                            }
+                        }
+                    }
+                }
+                drop(sources);
+                drop(base);
+                *self.registry.write().await = Some(new_registry);
+            }
+        }
+
+        // Update file_scripts index
+        {
+            let mut fs = self.file_scripts.write().await;
+            fs.insert(file_key, new_script_names);
+        }
+
         // Re-register + type check
         let mut reg_guard = self.registry.write().await;
         if let Some(ref mut registry) = *reg_guard {
@@ -146,7 +252,7 @@ impl Backend {
                         script.line,
                         0,
                         &format!("unknown trigger: '{}'", script.trigger),
-                        DiagnosticSeverity::WARNING,
+                        DiagnosticSeverity::ERROR,
                         text,
                     ));
                 }
@@ -303,6 +409,8 @@ async fn init_registry(
     all_compiled_lock: &Arc<RwLock<Vec<CompiledScript>>>,
     all_sources_lock: &Arc<RwLock<std::collections::HashMap<String, String>>>,
     definitions_lock: &Arc<RwLock<DefIndex>>,
+    param_names_lock: &Arc<RwLock<ParamNameIndex>>,
+    base_registry_lock: &Arc<RwLock<Option<SymbolRegistry>>>,
     client: Client,
     documents: Arc<DashMap<Url, String>>,
 ) {
@@ -326,11 +434,34 @@ async fn init_registry(
     }
     symloader::patch_command_return_types(&mut registry);
 
+    // Save base registry (before scripts) for clean rebuilds
+    *base_registry_lock.write().await = Some(registry.clone());
+
     let mut rs2_files: Vec<PathBuf> = Vec::new();
     collect_rs2_files(&scripts_dir, &mut rs2_files);
     rs2_files.sort();
 
     let mut defs: DefIndex = std::collections::HashMap::new();
+    let mut pnames: ParamNameIndex = std::collections::HashMap::new();
+
+    // Collect command param names from engine.rs2
+    if engine_rs2.exists() {
+        if let Ok(src) = std::fs::read_to_string(&engine_rs2) {
+            let mut lx = Lexer::new(&src, &engine_rs2);
+            if let Ok(toks) = lx.tokenize() {
+                let mut pr = Parser::new(toks, &engine_rs2);
+                if let Ok(f) = pr.parse() {
+                    for s in &f.scripts {
+                        if s.trigger == "command" {
+                            let names: Vec<String> =
+                                s.params.iter().map(|p| p.name.clone()).collect();
+                            pnames.insert(s.name.clone(), names);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     for path in &rs2_files {
         let Ok(source) = std::fs::read_to_string(path) else {
@@ -347,13 +478,14 @@ async fn init_registry(
                 continue;
             }
             let param_types = script.params.iter().map(|p| p.param_type).collect();
+            let names: Vec<String> = script.params.iter().map(|p| p.name.clone()).collect();
+            pnames.insert(script.name.clone(), names);
             registry.register_script(
                 script.name.clone(),
                 script.trigger.clone(),
                 param_types,
                 script.return_types.clone(),
             );
-            // Index definition location for go-to-definition
             let key = format!("script:{}", script.name);
             defs.insert(
                 key,
@@ -399,6 +531,10 @@ async fn init_registry(
         "category.pack",
         "synth.pack",
         "hunt.pack",
+        "varp.pack",
+        "varn.pack",
+        "vars.pack",
+        "varbit.pack",
         "idk.pack",
         "interface.pack",
         "overlayinterface.pack",
@@ -463,14 +599,15 @@ async fn init_registry(
     *all_compiled_lock.write().await = all_compiled;
     *all_sources_lock.write().await = all_sources_map;
     *definitions_lock.write().await = defs;
+    *param_names_lock.write().await = pnames;
 
     info!("Registry initialized");
 
     *scripts_dir_lock.write().await = Some(scripts_dir);
     *registry_lock.write().await = Some(registry);
 
-    // Notify client to re-request semantic tokens now that the registry is ready
     client.semantic_tokens_refresh().await.ok();
+    client.inlay_hint_refresh().await.ok();
 
     // Re-diagnose all open documents now that registry is available
     for entry in documents.iter() {
@@ -499,7 +636,7 @@ async fn init_registry(
                         script.line,
                         0,
                         &format!("unknown trigger: '{}'", script.trigger),
-                        DiagnosticSeverity::WARNING,
+                        DiagnosticSeverity::ERROR,
                         &text,
                     ));
                 }
@@ -628,11 +765,301 @@ fn make_diagnostic_with_source(
     }
 }
 
+fn format_command_hover(sym: &runec::symbol::Symbol, pnames: &ParamNameIndex) -> String {
+    match &sym.kind {
+        runec::symbol::SymbolKind::Command {
+            param_types,
+            return_types,
+            ..
+        } => {
+            let params = if let Some(names) = pnames.get(&sym.name) {
+                param_types
+                    .iter()
+                    .zip(names.iter())
+                    .map(|(t, n)| format!("{} ${}", t, n.trim_start_matches('$')))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                param_types
+                    .iter()
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let ret = if return_types.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "({})",
+                    return_types
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            format!("```rs2\n[command,{}]({}){}\n```", sym.name, params, ret)
+        }
+        _ => format!("`{}`", sym.name),
+    }
+}
+
+fn format_script_hover(sym: &runec::symbol::Symbol, pnames: &ParamNameIndex) -> String {
+    match &sym.kind {
+        runec::symbol::SymbolKind::Script {
+            trigger,
+            param_types,
+            return_types,
+            ..
+        } => {
+            let params = if let Some(names) = pnames.get(&sym.name) {
+                param_types
+                    .iter()
+                    .zip(names.iter())
+                    .map(|(t, n)| format!("{} ${}", t, n.trim_start_matches('$')))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                param_types
+                    .iter()
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let ret = if return_types.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "({})",
+                    return_types
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            format!("```rs2\n[{},{}]({}){}\n```", trigger, sym.name, params, ret)
+        }
+        _ => format!("`{}`", sym.name),
+    }
+}
+
+fn format_game_var_hover(sym: &runec::symbol::Symbol) -> String {
+    match &sym.kind {
+        runec::symbol::SymbolKind::GameVar {
+            var_type, category, ..
+        } => {
+            format!("```rs2\n{} %{} // {}\n```", var_type, sym.name, category)
+        }
+        _ => format!("`%{}`", sym.name),
+    }
+}
+
+fn format_constant_hover(sym: &runec::symbol::Symbol) -> String {
+    match &sym.kind {
+        runec::symbol::SymbolKind::Constant {
+            const_type,
+            int_value,
+            string_value,
+            ..
+        } => {
+            let val = if let Some(s) = string_value {
+                format!("\"{}\"", s)
+            } else if let Some(i) = int_value {
+                i.to_string()
+            } else {
+                "?".to_string()
+            };
+            format!("```rs2\n{} ^{} = {}\n```", const_type, sym.name, val)
+        }
+        _ => format!("`^{}`", sym.name),
+    }
+}
+
+fn get_call_context(text: &str, pos: Position) -> Option<(String, usize)> {
+    let line = text.lines().nth(pos.line as usize)?;
+    let col = pos.character as usize;
+    let bytes = line.as_bytes();
+    if col == 0 || col > bytes.len() {
+        return None;
+    }
+
+    let mut depth = 0i32;
+    let mut commas = 0usize;
+    let mut i = col.min(bytes.len()) - 1;
+
+    loop {
+        match bytes[i] {
+            b')' => depth += 1,
+            b'(' => {
+                if depth == 0 {
+                    // Found the opening paren at our depth
+                    let paren_pos = i;
+                    // Walk back to find the command/proc name
+                    if paren_pos == 0 {
+                        return None;
+                    }
+                    let mut j = paren_pos - 1;
+                    while j > 0 && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                        j -= 1;
+                    }
+                    let end = j + 1;
+                    while j > 0 && (bytes[j - 1].is_ascii_alphanumeric() || bytes[j - 1] == b'_') {
+                        j -= 1;
+                    }
+                    if end <= j {
+                        return None;
+                    }
+                    // Check for ~ prefix (proc call)
+                    let name = if j > 0 && bytes[j - 1] == b'~' {
+                        &line[j..end]
+                    } else {
+                        &line[j..end]
+                    };
+                    if name.is_empty() {
+                        return None;
+                    }
+                    return Some((name.to_string(), commas));
+                }
+                depth -= 1;
+            }
+            b',' if depth == 0 => commas += 1,
+            b'"' => {
+                // Skip backwards over string
+                if i > 0 {
+                    i -= 1;
+                    while i > 0 && bytes[i] != b'"' {
+                        i -= 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+        if i == 0 {
+            break;
+        }
+        i -= 1;
+    }
+    None
+}
+
+const SCRIPT_TRIGGER_TYPES: &[&str] = &[
+    "queue", "timer", "softtimer", "walktrigger", "proc", "label",
+    "clientscript", "debugproc",
+];
+
+fn pack_type_matches(pack_type: &str, expected_type: &str) -> bool {
+    if pack_type == expected_type {
+        return true;
+    }
+    match (pack_type, expected_type) {
+        ("obj", "namedobj") | ("namedobj", "obj") => true,
+        _ => false,
+    }
+}
+
+fn config_extension(pack_type: &str) -> &str {
+    match pack_type {
+        "interface" => "if",
+        "namedobj" => "obj",
+        _ => pack_type,
+    }
+}
+
+fn read_entity_config(name: &str, pack_type: &str, content_dir: &Path) -> Option<String> {
+    let ext = config_extension(pack_type);
+    fn search_dir(dir: &Path, ext: &str, name: &str) -> Option<String> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return None;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(result) = search_dir(&path, ext, name) {
+                    return Some(result);
+                }
+            } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let header = format!("[{}]", name);
+                    if let Some(start) = content.find(&header) {
+                        let block = &content[start..];
+                        let end = block[header.len()..]
+                            .find("\n[")
+                            .map(|i| i + header.len())
+                            .unwrap_or(block.len());
+                        let section = block[..end].trim();
+                        return Some(format!("```\n{}\n```", section));
+                    }
+                }
+            }
+        }
+        None
+    }
+    search_dir(content_dir, ext, name)
+}
+
+fn find_local_var_def_text(text: &str, var_name: &str, cursor_line: u32) -> Option<String> {
+    let target = format!("${}", var_name);
+    let mut scope_start = 0;
+    for (line_idx, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') && trimmed.contains(']') {
+            if line_idx <= cursor_line as usize {
+                scope_start = line_idx;
+            } else {
+                break;
+            }
+        }
+    }
+    for line in text.lines().skip(scope_start) {
+        let trimmed = line.trim_start();
+        let is_header = trimmed.starts_with('[');
+        let is_def = trimmed.starts_with("def_");
+        if !is_header && !is_def {
+            continue;
+        }
+        if line.contains(&target) {
+            let after_pos = line.find(&target).unwrap() + target.len();
+            if after_pos >= line.len()
+                || !line.as_bytes()[after_pos].is_ascii_alphanumeric()
+                    && line.as_bytes()[after_pos] != b'_'
+            {
+                return Some(trimmed.trim_end_matches(';').trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn is_inside_string(text: &str, pos: Position) -> bool {
+    let Some(line) = text.lines().nth(pos.line as usize) else {
+        return false;
+    };
+    let col = pos.character as usize;
+    let mut in_string = false;
+    let mut in_interp = false;
+    for (i, c) in line.chars().enumerate() {
+        if i >= col {
+            break;
+        }
+        if c == '"' && !in_interp {
+            in_string = !in_string;
+        }
+        if in_string && c == '<' {
+            in_interp = true;
+        }
+        if in_string && c == '>' {
+            in_interp = false;
+        }
+    }
+    in_string && !in_interp
+}
+
 fn word_at_position(text: &str, pos: Position) -> String {
     let Some(line) = text.lines().nth(pos.line as usize) else {
         return String::new();
     };
-    let col = pos.character as usize;
+    let mut col = pos.character as usize;
     let bytes = line.as_bytes();
     if col >= bytes.len() {
         return String::new();
@@ -640,19 +1067,17 @@ fn word_at_position(text: &str, pos: Position) -> String {
 
     let is_word_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
 
+    if matches!(bytes[col], b'~' | b'@' | b'^' | b'$' | b'%') {
+        if col + 1 < bytes.len() && is_word_char(bytes[col + 1]) {
+            col += 1;
+        }
+    }
+
     // Expand left
     let mut start = col;
     while start > 0 && is_word_char(bytes[start - 1]) {
         start -= 1;
     }
-    // Skip leading ~ or @ or ^ or $ or %
-    let prefix_start = if start > 0 && matches!(bytes[start - 1], b'~' | b'@' | b'^' | b'$' | b'%')
-    {
-        start - 1
-    } else {
-        start
-    };
-    let _ = prefix_start; // we only want the bare word for lookup
 
     // Expand right
     let mut end = col;
@@ -664,6 +1089,68 @@ fn word_at_position(text: &str, pos: Position) -> String {
         return String::new();
     }
     line[start..end].to_string()
+}
+
+fn word_prefix_at_position(text: &str, pos: Position) -> Option<u8> {
+    let line = text.lines().nth(pos.line as usize)?;
+    let col = pos.character as usize;
+    let bytes = line.as_bytes();
+    if col >= bytes.len() {
+        return None;
+    }
+    let is_word_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    if matches!(bytes[col], b'~' | b'@' | b'^' | b'$' | b'%') {
+        if col + 1 < bytes.len() && is_word_char(bytes[col + 1]) {
+            return Some(bytes[col]);
+        }
+        return None;
+    }
+    let mut start = col;
+    while start > 0 && is_word_char(bytes[start - 1]) {
+        start -= 1;
+    }
+    if start > 0 && matches!(bytes[start - 1], b'~' | b'@' | b'^' | b'$' | b'%') {
+        return Some(bytes[start - 1]);
+    }
+    None
+}
+
+fn find_local_var_definition(text: &str, var_name: &str, cursor_line: u32) -> Option<(u32, u32)> {
+    let target = format!("${}", var_name);
+
+    let mut scope_start = 0;
+    let mut scope_end = text.lines().count();
+    for (line_idx, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') && trimmed.contains(']') {
+            if line_idx <= cursor_line as usize {
+                scope_start = line_idx;
+            } else {
+                scope_end = line_idx;
+                break;
+            }
+        }
+    }
+
+    for (line_idx, line) in text.lines().enumerate().skip(scope_start).take(scope_end - scope_start)
+    {
+        let trimmed = line.trim_start();
+        let is_header = trimmed.starts_with('[');
+        let is_def = trimmed.starts_with("def_");
+        if !is_header && !is_def {
+            continue;
+        }
+        if let Some(pos) = line.find(&target) {
+            let after = pos + target.len();
+            if after >= line.len()
+                || !line.as_bytes()[after].is_ascii_alphanumeric()
+                    && line.as_bytes()[after] != b'_'
+            {
+                return Some((line_idx as u32, pos as u32));
+            }
+        }
+    }
+    None
 }
 
 fn uri_to_path(uri: &Url) -> PathBuf {
@@ -719,6 +1206,7 @@ fn collect_rs2_files(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+
 }
 
 #[tower_lsp::async_trait]
@@ -733,6 +1221,8 @@ impl LanguageServer for Backend {
                 let all_compiled = self.all_compiled.clone();
                 let all_sources = self.all_sources.clone();
                 let definitions = self.definitions.clone();
+                let param_names = self.param_names.clone();
+                let base_registry = self.base_registry.clone();
                 let client = self.client.clone();
                 let documents = self.documents.clone();
                 tokio::spawn(async move {
@@ -743,6 +1233,8 @@ impl LanguageServer for Backend {
                         &all_compiled,
                         &all_sources,
                         &definitions,
+                        &param_names,
+                        &base_registry,
                         client,
                         documents,
                     )
@@ -763,8 +1255,10 @@ impl LanguageServer for Backend {
                         ..Default::default()
                     },
                 )),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
+                // inlay hints provided by the plugin, not the LSP
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -810,7 +1304,27 @@ impl LanguageServer for Backend {
         let uri = params.text_document.uri;
         if let Some(change) = params.content_changes.into_iter().last() {
             self.documents.insert(uri.clone(), change.text.clone());
+
+            // Keep all_sources in sync so registry rebuilds use latest content
+            let file_path = uri_to_path(&uri);
+            let path_key = file_path.to_string_lossy().to_string();
+            {
+                let mut sources = self.all_sources.write().await;
+                sources.insert(path_key, change.text.clone());
+            }
+
             self.diagnose(&uri, &change.text).await;
+
+            // Re-diagnose other open documents for cross-file errors
+            let other_docs: Vec<(Url, String)> = self
+                .documents
+                .iter()
+                .filter(|e| e.key() != &uri)
+                .map(|e| (e.key().clone(), e.value().clone()))
+                .collect();
+            for (other_uri, other_text) in other_docs {
+                self.diagnose(&other_uri, &other_text).await;
+            }
         }
     }
 
@@ -914,6 +1428,153 @@ impl LanguageServer for Backend {
             .await;
     }
 
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let Some(text) = self.documents.get(uri).map(|v| v.clone()) else {
+            return Ok(None);
+        };
+
+        let word = word_at_position(&text, pos);
+        if word.is_empty() {
+            return Ok(None);
+        }
+
+        // Skip hover inside string literals
+        if is_inside_string(&text, pos) {
+            return Ok(None);
+        }
+
+        let prefix = word_prefix_at_position(&text, pos);
+
+        let markdown: Option<String> = match prefix {
+            Some(b'$') => find_local_var_def_text(&text, &word, pos.line)
+                .map(|line| format!("```rs2\n{}\n```", line)),
+            Some(b'~') | Some(b'@') => {
+                let reg = self.registry.read().await;
+                let pn = self.param_names.read().await;
+                reg.as_ref()
+                    .and_then(|r| r.lookup_script(&word).map(|s| format_script_hover(s, &pn)))
+            }
+            Some(b'%') => {
+                let reg = self.registry.read().await;
+                reg.as_ref()
+                    .and_then(|r| r.lookup_game_var(&word).map(format_game_var_hover))
+            }
+            Some(b'^') => {
+                let reg = self.registry.read().await;
+                reg.as_ref()
+                    .and_then(|r| r.lookup_constant(&word).map(format_constant_hover))
+            }
+            _ => {
+                // Phase 1: check command and script (registry lock only)
+                let (cmd_result, script_result) = {
+                    let reg = self.registry.read().await;
+                    let pn = self.param_names.read().await;
+                    match reg.as_ref() {
+                        Some(r) => (
+                            r.lookup_command(&word).map(|s| format_command_hover(s, &pn)),
+                            r.lookup_script(&word).map(|s| format_script_hover(s, &pn)),
+                        ),
+                        None => (None, None),
+                    }
+                }; // locks dropped
+
+                if cmd_result.is_some() {
+                    cmd_result
+                } else {
+                    // Check argument context to determine expected type
+                    let expected_type = if let Some((call_name, arg_idx)) = get_call_context(&text, pos) {
+                        let reg = self.registry.read().await;
+                        let pn = self.param_names.read().await;
+                        reg.as_ref().and_then(|r| {
+                            // Get param types from command or script
+                            let param_types = if let Some(sym) = r.lookup_command(&call_name) {
+                                match &sym.kind {
+                                    runec::symbol::SymbolKind::Command { param_types, .. } => Some(param_types.clone()),
+                                    _ => None,
+                                }
+                            } else if let Some(sym) = r.lookup_script(&call_name) {
+                                match &sym.kind {
+                                    runec::symbol::SymbolKind::Script { param_types, .. } => Some(param_types.clone()),
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            };
+                            param_types.and_then(|types| types.get(arg_idx).map(|t| t.name().to_string()))
+                        })
+                    } else {
+                        None
+                    };
+
+                    // If expected type is a script trigger type, show script hover
+                    if let Some(ref etype) = expected_type {
+                        if SCRIPT_TRIGGER_TYPES.contains(&etype.as_str()) {
+                            if script_result.is_some() {
+                                return Ok(script_result.map(|md| Hover {
+                                    contents: HoverContents::Markup(MarkupContent {
+                                        kind: MarkupKind::Markdown,
+                                        value: md,
+                                    }),
+                                    range: None,
+                                }));
+                            }
+                        }
+                    }
+
+                    // If expected type matches a pack type, search that specific pack
+                    let entity_info = if let Some(ref etype) = expected_type {
+                        let defs = self.definitions.read().await;
+                        // Look for the entity in the specific pack for this type
+                        let key = format!("entity:{}", word);
+                        defs.get(&key).and_then(|def| {
+                            let pt = def.path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                            if pack_type_matches(pt, etype) {
+                                let cd = def.path.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+                                Some((pt.to_string(), cd))
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        // No context — search all packs
+                        let defs = self.definitions.read().await;
+                        defs.get(&format!("entity:{}", word)).map(|def| {
+                            let pt = def.path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                            let cd = def.path.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+                            (pt, cd)
+                        })
+                    };
+
+                    if let Some((pack_type, content_dir)) = entity_info {
+                        let config = content_dir.and_then(|d| {
+                            let scripts = d.join("scripts");
+                            if scripts.exists() {
+                                read_entity_config(&word, &pack_type, &scripts)
+                            } else {
+                                None
+                            }
+                        });
+                        Some(config.unwrap_or_else(|| format!("{} ({})", word, pack_type)))
+                    } else {
+                        script_result
+                    }
+                }
+            }
+        };
+
+        let value = markdown.unwrap_or_else(|| word.clone());
+        Ok(Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value,
+            }),
+            range: None,
+        }))
+    }
+
     async fn goto_definition(
         &self,
         params: GotoDefinitionParams,
@@ -930,6 +1591,24 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
+        if word_prefix_at_position(&text, pos) == Some(b'$') {
+            if let Some((line, col)) = find_local_var_definition(&text, &word, pos.line) {
+                return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                    uri: uri.clone(),
+                    range: Range {
+                        start: Position {
+                            line,
+                            character: col,
+                        },
+                        end: Position {
+                            line,
+                            character: col + word.len() as u32 + 1,
+                        },
+                    },
+                })));
+            }
+        }
+
         let defs = self.definitions.read().await;
 
         // Try script (proc/label), then command, then entity, then constant
@@ -939,6 +1618,19 @@ impl LanguageServer for Backend {
             format!("entity:{}", word),
             format!("constant:{}", word),
         ];
+
+        // If cursor is on a trigger header line, we're at the declaration — don't return self
+        let at_declaration = text
+            .lines()
+            .nth(pos.line as usize)
+            .map(|line| {
+                let t = line.trim_start();
+                t.starts_with('[') && t.contains(&format!(",{}]", word))
+            })
+            .unwrap_or(false);
+        if at_declaration {
+            return Ok(None);
+        }
 
         for key in &keys {
             if let Some(def) = defs.get(key) {
@@ -1022,6 +1714,188 @@ impl LanguageServer for Backend {
         } else {
             Ok(Some(locations))
         }
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let uri = &params.text_document.uri;
+        let range = params.range;
+
+        let Some(text) = self.documents.get(uri).map(|v| v.clone()) else {
+            return Ok(None);
+        };
+
+        let file_path = uri_to_path(uri);
+        let mut lexer = Lexer::new(&text, &file_path);
+        let Ok(tokens) = lexer.tokenize() else {
+            return Ok(None);
+        };
+
+        let reg_guard = self.registry.read().await;
+        let Some(ref registry) = *reg_guard else {
+            return Ok(None);
+        };
+        let pnames = self.param_names.read().await;
+
+        let mut hints = Vec::new();
+
+        let mut i = 0;
+        while i < tokens.len() {
+            let tok = &tokens[i];
+            let line0 = tok.line.saturating_sub(1) as u32;
+            if line0 < range.start.line || line0 > range.end.line {
+                i += 1;
+                continue;
+            }
+
+            // Detect command(args) or ~proc(args)
+            let (call_name, is_script) = match &tok.kind {
+                TokenKind::Command | TokenKind::Identifier => {
+                    if registry.lookup_command(&tok.value).is_some() {
+                        (tok.value.as_str(), false)
+                    } else {
+                        i += 1;
+                        continue;
+                    }
+                }
+                TokenKind::ScriptCall => {
+                    // ~ token, next token is the name
+                    if i + 1 < tokens.len() {
+                        let name_tok = &tokens[i + 1];
+                        (name_tok.value.as_str(), true)
+                    } else {
+                        i += 1;
+                        continue;
+                    }
+                }
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+
+            // Find the opening paren
+            let paren_idx = if is_script { i + 2 } else { i + 1 };
+            if paren_idx >= tokens.len() || tokens[paren_idx].kind != TokenKind::LParen {
+                i += 1;
+                continue;
+            }
+
+            // Get param names for this call
+            let names = pnames.get(call_name);
+
+            // Get return types for proc calls
+            let return_types = if is_script {
+                registry
+                    .lookup_script(call_name)
+                    .and_then(|sym| match &sym.kind {
+                        runec::symbol::SymbolKind::Script { return_types, .. } => {
+                            if return_types.is_empty() {
+                                None
+                            } else {
+                                Some(return_types.clone())
+                            }
+                        }
+                        _ => None,
+                    })
+            } else {
+                None
+            };
+
+            // Walk arguments and generate parameter name hints
+            if let Some(names) = names {
+                let mut arg_idx = 0;
+                let mut depth = 0;
+                let mut j = paren_idx;
+                while j < tokens.len() {
+                    match tokens[j].kind {
+                        TokenKind::LParen => {
+                            depth += 1;
+                            if depth == 1 && arg_idx < names.len() {
+                                // Hint before the first argument
+                                if j + 1 < tokens.len() && tokens[j + 1].kind != TokenKind::RParen
+                                {
+                                    let next = &tokens[j + 1];
+                                    hints.push(InlayHint {
+                                        position: Position {
+                                            line: next.line.saturating_sub(1) as u32,
+                                            character: next.column.saturating_sub(1) as u32,
+                                        },
+                                        label: InlayHintLabel::String(format!(
+                                            "{}:",
+                                            names[arg_idx].trim_start_matches('$')
+                                        )),
+                                        kind: Some(InlayHintKind::PARAMETER),
+                                        padding_right: Some(true),
+                                        padding_left: None,
+                                        text_edits: None,
+                                        tooltip: None,
+                                        data: None,
+                                    });
+                                }
+                            }
+                        }
+                        TokenKind::RParen => {
+                            depth -= 1;
+                            if depth == 0 {
+                                // Return type hint after closing paren
+                                if let Some(ref rtypes) = return_types {
+                                    let label = rtypes
+                                        .iter()
+                                        .map(|t| t.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    hints.push(InlayHint {
+                                        position: Position {
+                                            line: tokens[j].line.saturating_sub(1) as u32,
+                                            character: tokens[j].column as u32,
+                                        },
+                                        label: InlayHintLabel::String(format!("-> {}", label)),
+                                        kind: Some(InlayHintKind::TYPE),
+                                        padding_left: Some(true),
+                                        padding_right: None,
+                                        text_edits: None,
+                                        tooltip: None,
+                                        data: None,
+                                    });
+                                }
+                                break;
+                            }
+                        }
+                        TokenKind::Comma if depth == 1 => {
+                            arg_idx += 1;
+                            if arg_idx < names.len() && j + 1 < tokens.len() {
+                                let next = &tokens[j + 1];
+                                hints.push(InlayHint {
+                                    position: Position {
+                                        line: next.line.saturating_sub(1) as u32,
+                                        character: next.column.saturating_sub(1) as u32,
+                                    },
+                                    label: InlayHintLabel::String(format!(
+                                        "{}:",
+                                        names[arg_idx].trim_start_matches('$')
+                                    )),
+                                    kind: Some(InlayHintKind::PARAMETER),
+                                    padding_right: Some(true),
+                                    padding_left: None,
+                                    text_edits: None,
+                                    tooltip: None,
+                                    data: None,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                i = j + 1;
+            } else {
+                i += 1;
+            }
+
+            continue;
+        }
+
+        Ok(Some(hints))
     }
 
     async fn semantic_tokens_full(
