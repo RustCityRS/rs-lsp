@@ -12,8 +12,8 @@ import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
-import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.util.FileContentUtilCore
 import com.intellij.refactoring.rename.RenameHandler
@@ -30,12 +30,24 @@ class Rs2RenameHandler : RenameHandler {
 
     override fun invoke(project: Project, editor: Editor?, file: PsiFile?, dataContext: DataContext) {
         if (editor == null || file == null) return
-        val element = file.findElementAt(editor.caretModel.offset) ?: return
+        val offset = if (editor.selectionModel.hasSelection()) editor.selectionModel.selectionStart else editor.caretModel.offset
+        val element = file.findElementAt(offset) ?: return
         val node = element.node ?: return
         val tokenType = node.elementType
         val oldName = element.text
 
         if (oldName.isBlank()) return
+
+        val nonRenameable = setOf(
+            Rs2TokenTypes.TYPE_NAME, Rs2TokenTypes.KEYWORD, Rs2TokenTypes.TRUE,
+            Rs2TokenTypes.FALSE, Rs2TokenTypes.NULL, Rs2TokenTypes.TRIGGER_TYPE,
+            Rs2TokenTypes.OPERATOR, Rs2TokenTypes.PAREN, Rs2TokenTypes.BRACE,
+            Rs2TokenTypes.COMMA, Rs2TokenTypes.SEMICOLON, Rs2TokenTypes.DOT,
+            Rs2TokenTypes.TRIGGER_BRACKET, Rs2TokenTypes.NUMBER, Rs2TokenTypes.COORD_LITERAL,
+            Rs2TokenTypes.STRING, Rs2TokenTypes.COMMENT, Rs2TokenTypes.WHITESPACE,
+            Rs2TokenTypes.NEWLINE, Rs2TokenTypes.CODE
+        )
+        if (tokenType in nonRenameable) return
 
         // Strip prefix for display
         val displayName = when (tokenType) {
@@ -109,23 +121,59 @@ class Rs2RenameHandler : RenameHandler {
                 }
             }
             Rs2TokenTypes.GAME_VAR -> {
-                // Game vars: rename across .rs2 files
+                // Game vars: rename across .rs2 files, config files, and pack files
                 val scriptsDir = baseDir.findFileByRelativePath("content/scripts")
                 if (scriptsDir != null) {
                     collectReplacementsInDirectory(scriptsDir, "rs2", bareName, newName, project, replacements, prefixed = true)
                 }
+                val packDir = baseDir.findFileByRelativePath("content/pack")
+                val contentDir = baseDir.findFileByRelativePath("content")
+                if (packDir != null) {
+                    for (varPack in listOf("varp.pack", "varn.pack", "vars.pack", "varbit.pack")) {
+                        val packFile = packDir.findChild(varPack) ?: continue
+                        val psiFile = PsiManager.getInstance(project).findFile(packFile) ?: continue
+                        val found = psiFile.text.lines().any { line ->
+                            val eqIdx = line.indexOf('=')
+                            eqIdx >= 0 && line.substring(eqIdx + 1).trim() == bareName
+                        }
+                        if (found) {
+                            collectReplacementsInFile(packFile, bareName, newName, project, replacements, wholeLineValue = true)
+                            val configExt = varPack.removeSuffix(".pack")
+                            if (contentDir != null) {
+                                collectConfigHeaderReplacements(contentDir, configExt, bareName, newName, project, replacements)
+                            }
+                        }
+                    }
+                }
             }
             Rs2TokenTypes.IDENTIFIER, Rs2TokenTypes.TRIGGER_SUBJECT -> {
-                // Entity names: rename in .rs2 and .pack files
-                val scriptsDir = baseDir.findFileByRelativePath("content/scripts")
-                if (scriptsDir != null) {
-                    collectReplacementsInDirectory(scriptsDir, "rs2", bareName, newName, project, replacements, prefixed = false)
-                }
+                // Entity names: rename in config file, pack file, and trigger headers only
                 val packDir = baseDir.findFileByRelativePath("content/pack")
                 if (packDir != null) {
                     for (packFile in packDir.children.filter { it.extension == "pack" }) {
-                        collectReplacementsInFile(packFile, bareName, newName, project, replacements, wholeLineValue = true)
+                        val psiFile = PsiManager.getInstance(project).findFile(packFile) ?: continue
+                        val text = psiFile.text
+                        val found = text.lines().any { line ->
+                            val eqIdx = line.indexOf('=')
+                            eqIdx >= 0 && line.substring(eqIdx + 1).trim() == bareName
+                        }
+                        if (found) {
+                            // Rename in the pack file
+                            collectReplacementsInFile(packFile, bareName, newName, project, replacements, wholeLineValue = true)
+                            // Rename in config files (.obj, .npc, etc.)
+                            val configExt = packFile.nameWithoutExtension
+                            val contentDir = baseDir.findFileByRelativePath("content")
+                            if (contentDir != null) {
+                                collectConfigHeaderReplacements(contentDir, configExt, bareName, newName, project, replacements)
+                            }
+                        }
                     }
+                }
+                // Rename in trigger headers (excluding proc/label/debugproc) and code usages
+                val scriptsDir = baseDir.findFileByRelativePath("content/scripts")
+                if (scriptsDir != null) {
+                    collectTriggerSubjectReplacements(scriptsDir, bareName, newName, project, replacements)
+                    collectEntityCodeUsages(scriptsDir, bareName, newName, project, replacements)
                 }
             }
         }
@@ -150,9 +198,16 @@ class Rs2RenameHandler : RenameHandler {
             Rs2CommandRegistry.invalidate(project)
         })
 
-        // Force reparse of all modified RS2 files to refresh highlighting immediately
+        // Save modified files so the LSP re-indexes definitions via didSave
+        val modifiedFiles = replacements.map { it.file }.toSet()
         ApplicationManager.getApplication().invokeLater {
             if (project.isDisposed) return@invokeLater
+            val docManager = FileDocumentManager.getInstance()
+            for (file in modifiedFiles) {
+                val psi = PsiManager.getInstance(project).findFile(file) ?: continue
+                val doc = PsiDocumentManager.getInstance(project).getDocument(psi) ?: continue
+                docManager.saveDocument(doc)
+            }
             val openRs2Files = FileEditorManager.getInstance(project).openFiles
                 .filter { it.extension == "rs2" }
             if (openRs2Files.isNotEmpty()) {
@@ -247,6 +302,116 @@ class Rs2RenameHandler : RenameHandler {
             }
             idx = found + oldName.length
         }
+    }
+
+    private fun collectConfigHeaderReplacements(
+        dir: VirtualFile, extension: String, oldName: String, newName: String,
+        project: Project, out: MutableList<Replacement>
+    ) {
+        for (child in dir.children) {
+            if (child.isDirectory) {
+                collectConfigHeaderReplacements(child, extension, oldName, newName, project, out)
+            } else if (child.extension == extension) {
+                val psiFile = PsiManager.getInstance(project).findFile(child) ?: continue
+                val text = psiFile.text
+                val target = "[$oldName]"
+                var idx = 0
+                while (idx < text.length) {
+                    val found = text.indexOf(target, idx)
+                    if (found < 0) break
+                    out.add(Replacement(child, found + 1, oldName.length, newName))
+                    idx = found + target.length
+                }
+            }
+        }
+    }
+
+    private val SKIP_TRIGGERS = setOf("proc", "label", "debugproc")
+
+    private fun collectTriggerSubjectReplacements(
+        dir: VirtualFile, oldName: String, newName: String,
+        project: Project, out: MutableList<Replacement>
+    ) {
+        for (child in dir.children) {
+            if (child.isDirectory) {
+                collectTriggerSubjectReplacements(child, oldName, newName, project, out)
+            } else if (child.extension == "rs2") {
+                val psiFile = PsiManager.getInstance(project).findFile(child) ?: continue
+                val text = psiFile.text
+                var offset = 0
+                for (line in text.lines()) {
+                    val trimmed = line.trimStart()
+                    if (trimmed.startsWith("[")) {
+                        val commaIdx = trimmed.indexOf(',')
+                        val closeBracket = if (commaIdx >= 0) trimmed.indexOf(']', commaIdx) else -1
+                        if (commaIdx >= 0 && closeBracket >= 0) {
+                            val triggerType = trimmed.substring(1, commaIdx).trim()
+                            val subject = trimmed.substring(commaIdx + 1, closeBracket).trim()
+                            if (subject == oldName && triggerType !in SKIP_TRIGGERS) {
+                                val subjectOffset = offset + line.indexOf(oldName, line.indexOf(','))
+                                out.add(Replacement(child, subjectOffset, oldName.length, newName))
+                            }
+                        }
+                    }
+                    offset += line.length + 1
+                }
+            }
+        }
+    }
+
+    private fun collectEntityCodeUsages(
+        dir: VirtualFile, oldName: String, newName: String,
+        project: Project, out: MutableList<Replacement>
+    ) {
+        for (child in dir.children) {
+            if (child.isDirectory) {
+                collectEntityCodeUsages(child, oldName, newName, project, out)
+            } else if (child.extension == "rs2") {
+                val psiFile = PsiManager.getInstance(project).findFile(child) ?: continue
+                val text = psiFile.text
+                var idx = 0
+                while (idx < text.length) {
+                    val found = text.indexOf(oldName, idx)
+                    if (found < 0) break
+                    val afterIdx = found + oldName.length
+                    val afterOk = afterIdx >= text.length || !text[afterIdx].isLetterOrDigit() && text[afterIdx] != '_'
+                    val beforeOk = found == 0 || !text[found - 1].isLetterOrDigit() && text[found - 1] != '_'
+                    if (beforeOk && afterOk) {
+                        val skip = found > 0 && text[found - 1] in listOf('~', '@', '$', '%', '^')
+                        val inSkippedTrigger = if (!skip) isInSkippedTriggerHeader(text, found) else true
+                        val inString = if (!skip && !inSkippedTrigger) isInsideString(text, found) else true
+                        if (!skip && !inSkippedTrigger && !inString) {
+                            out.add(Replacement(child, found, oldName.length, newName))
+                        }
+                    }
+                    idx = found + oldName.length
+                }
+            }
+        }
+    }
+
+    private fun isInSkippedTriggerHeader(text: String, offset: Int): Boolean {
+        var lineStart = offset - 1
+        while (lineStart >= 0 && text[lineStart] != '\n') lineStart--
+        lineStart++
+        val line = text.substring(lineStart, text.indexOf('\n', offset).let { if (it < 0) text.length else it })
+        val trimmed = line.trimStart()
+        if (!trimmed.startsWith("[")) return false
+        val commaIdx = trimmed.indexOf(',')
+        if (commaIdx < 0) return false
+        val triggerType = trimmed.substring(1, commaIdx).trim()
+        return triggerType in SKIP_TRIGGERS
+    }
+
+    private fun isInsideString(text: String, offset: Int): Boolean {
+        var lineStart = offset - 1
+        while (lineStart >= 0 && text[lineStart] != '\n') lineStart--
+        lineStart++
+        var inString = false
+        for (i in lineStart until offset) {
+            if (text[i] == '"') inString = !inString
+        }
+        return inString
     }
 
     private fun collectReplacementsInFile(

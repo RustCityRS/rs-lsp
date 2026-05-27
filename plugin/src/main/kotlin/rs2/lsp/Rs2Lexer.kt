@@ -10,6 +10,7 @@ class Rs2Lexer : LexerBase() {
     private var tokenStart = 0
     private var tokenEnd = 0
     private var tokenType: IElementType? = null
+    private var state = 0
 
     companion object {
         private val KEYWORDS = setOf(
@@ -28,7 +29,10 @@ class Rs2Lexer : LexerBase() {
             "def_char", "def_spotanim", "def_long", "def_npc_stat", "def_fontmetrics",
             "def_model", "def_idk", "def_midi", "def_jingle", "def_npc_mode",
             "def_locshape", "def_overlayinterface", "def_dbcolumn", "def_controller",
-            "int", "string", "boolean", "long", "char"
+            "def_player_uid", "def_softtimer", "def_timer", "def_queue",
+            "def_walktrigger", "def_npc_uid",
+            "int", "string", "boolean", "long", "char",
+            "proc", "label"
         )
         // Overloaded type names — only highlighted as types when in a type position (followed by $)
         private val BARE_TYPE_KEYWORDS = setOf(
@@ -36,11 +40,17 @@ class Rs2Lexer : LexerBase() {
             "enum", "stat", "seq", "synth", "category", "struct", "dbrow",
             "dbtable", "param", "hunt", "spotanim", "npc_stat", "fontmetrics",
             "model", "idk", "midi", "jingle", "npc_mode", "locshape",
-            "overlayinterface", "dbcolumn", "controller"
+            "overlayinterface", "dbcolumn", "controller",
+            "player_uid", "softtimer", "timer", "queue", "walktrigger", "npc_uid"
         )
         private val SCRIPT_NAME_TRIGGERS = setOf(
             "proc", "label", "debugproc", "clientscript", "queue",
             "timer", "softtimer", "walktrigger"
+        )
+        private val SCRIPT_REF_COMMANDS = setOf(
+            "queue", "timer", "softtimer", "walktrigger",
+            "settimer", "cleartimer", "clearsofttimer",
+            "gosub", "jump"
         )
     }
 
@@ -49,10 +59,11 @@ class Rs2Lexer : LexerBase() {
         this.startOffset = startOffset
         this.endOffset = endOffset
         this.tokenEnd = startOffset
+        this.state = initialState
         advance()
     }
 
-    override fun getState(): Int = 0
+    override fun getState(): Int = state
     override fun getTokenType(): IElementType? = tokenType
     override fun getTokenStart(): Int = tokenStart
     override fun getTokenEnd(): Int = tokenEnd
@@ -64,6 +75,41 @@ class Rs2Lexer : LexerBase() {
         if (tokenStart >= endOffset) {
             tokenType = null
             return
+        }
+
+        // Inside a string: scan until " (end), < (interpolation start), or newline
+        if (state == 1) {
+            val c = buffer[tokenStart]
+            if (c == '<') {
+                tokenEnd = tokenStart + 1
+                tokenType = Rs2TokenTypes.OPERATOR
+                state = 2
+            } else if (c == '"') {
+                tokenEnd = tokenStart + 1
+                tokenType = Rs2TokenTypes.STRING
+                state = 0
+            } else {
+                tokenEnd = tokenStart
+                while (tokenEnd < endOffset && buffer[tokenEnd] != '"' && buffer[tokenEnd] != '<' && buffer[tokenEnd] != '\n') tokenEnd++
+                if (tokenEnd < endOffset && buffer[tokenEnd] == '"') {
+                    tokenEnd++
+                    state = 0
+                }
+                tokenType = Rs2TokenTypes.STRING
+            }
+            return
+        }
+
+        // Inside string interpolation: tokenize normally until >
+        if (state == 2) {
+            val c = buffer[tokenStart]
+            if (c == '>') {
+                tokenEnd = tokenStart + 1
+                tokenType = Rs2TokenTypes.OPERATOR
+                state = 1
+                return
+            }
+            // Tokenize identifiers, $vars, parens, commas normally — fall through to main logic
         }
 
         val c = buffer[tokenStart]
@@ -93,11 +139,17 @@ class Rs2Lexer : LexerBase() {
                 tokenType = Rs2TokenTypes.COMMENT
             }
 
-            // String literal
+            // String literal — enter string state
             c == '"' -> {
                 tokenEnd = tokenStart + 1
-                while (tokenEnd < endOffset && buffer[tokenEnd] != '"' && buffer[tokenEnd] != '\n') tokenEnd++
-                if (tokenEnd < endOffset && buffer[tokenEnd] == '"') tokenEnd++
+                while (tokenEnd < endOffset && buffer[tokenEnd] != '"' && buffer[tokenEnd] != '<' && buffer[tokenEnd] != '\n') tokenEnd++
+                if (tokenEnd < endOffset && buffer[tokenEnd] == '"') {
+                    tokenEnd++
+                    // Simple string with no interpolation
+                } else {
+                    // Stopped at < or newline — enter string state
+                    state = 1
+                }
                 tokenType = Rs2TokenTypes.STRING
             }
 
@@ -165,13 +217,19 @@ class Rs2Lexer : LexerBase() {
                     word in KEYWORDS -> Rs2TokenTypes.KEYWORD
                     word in DEF_TYPE_KEYWORDS -> Rs2TokenTypes.TYPE_NAME
                     word in BARE_TYPE_KEYWORDS -> {
-                        if (isInTypePosition()) Rs2TokenTypes.TYPE_NAME else Rs2TokenTypes.IDENTIFIER
+                        when {
+                            isInTypePosition() -> Rs2TokenTypes.TYPE_NAME
+                            isInTriggerHeader() -> classifyTriggerWord(word)
+                            else -> Rs2TokenTypes.IDENTIFIER
+                        }
                     }
                     else -> {
                         if (isInTriggerHeader()) {
                             classifyTriggerWord(word)
                         } else if (isFollowedByParen()) {
                             Rs2TokenTypes.COMMAND
+                        } else if (isFirstArgOfScriptCommand()) {
+                            Rs2TokenTypes.PROC_CALL
                         } else {
                             Rs2TokenTypes.IDENTIFIER
                         }
@@ -308,5 +366,17 @@ class Rs2Lexer : LexerBase() {
         val start = i
         while (i < endOffset && buffer[i] != ',' && buffer[i] != ']') i++
         return buffer.subSequence(start, i).toString().trim()
+    }
+
+    private fun isFirstArgOfScriptCommand(): Boolean {
+        var i = tokenStart - 1
+        while (i >= startOffset && (buffer[i] == ' ' || buffer[i] == '\t')) i--
+        if (i < startOffset || buffer[i] != '(') return false
+        i--
+        while (i >= startOffset && (buffer[i] == ' ' || buffer[i] == '\t')) i--
+        val end = i + 1
+        while (i >= startOffset && isIdentChar(buffer[i])) i--
+        val cmdName = buffer.subSequence(i + 1, end).toString()
+        return cmdName in SCRIPT_REF_COMMANDS
     }
 }

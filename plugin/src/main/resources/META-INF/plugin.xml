@@ -34,6 +34,13 @@
         <gotoDeclarationHandler
                 implementation="rs2.lsp.Rs2GotoDeclarationHandler"/>
 
+        <lang.findUsagesProvider
+                language="RS2"
+                implementationClass="rs2.lsp.Rs2FindUsagesProvider"/>
+
+        <findUsagesHandlerFactory
+                implementation="rs2.lsp.Rs2FindUsagesHandlerFactory"/>
+
         <renameHandler
                 implementation="rs2.lsp.Rs2RenameHandler"/>
 
@@ -52,6 +59,12 @@
         <additionalTextAttributes scheme="Darcula" file="colorSchemes/Rs2Default.xml"/>
         <additionalTextAttributes scheme="Dark" file="colorSchemes/Rs2Default.xml"/>
 
+        <iconProvider implementation="rs2.lsp.Rs2IconProvider"/>
+
+        <codeInsight.inlayProvider
+                language="RS2"
+                implementationClass="rs2.lsp.Rs2InlayHintsProvider"/>
+
         <postStartupActivity implementation="rs2.lsp.Rs2StartupActivity"/>
 
         <notificationGroup id="RS2 LSP"
@@ -61,6 +74,10 @@
     <applicationListeners>
         <listener class="rs2.lsp.Rs2FileChangeListener"
                   topic="com.intellij.openapi.command.CommandListener"/>
+        <listener class="rs2.lsp.Rs2ProjectCloseListener"
+                  topic="com.intellij.openapi.project.ProjectCloseListener"/>
+        <listener class="rs2.lsp.Rs2VfsListener"
+                  topic="com.intellij.openapi.vfs.newvfs.BulkFileListener"/>
     </applicationListeners>
 
     <actions>

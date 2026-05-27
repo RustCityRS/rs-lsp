@@ -84,7 +84,7 @@ class Rs2SyntaxHighlighter : SyntaxHighlighterBase() {
             Rs2TokenTypes.COMMAND -> arrayOf(COMMAND_KEY)
             Rs2TokenTypes.IDENTIFIER -> arrayOf(IDENTIFIER_KEY)
             Rs2TokenTypes.TRIGGER_BRACKET -> arrayOf(TRIGGER_BRACKET_KEY)
-            Rs2TokenTypes.TRIGGER_TYPE -> arrayOf(TRIGGER_TYPE_KEY)
+            Rs2TokenTypes.TRIGGER_TYPE -> arrayOf(TYPE_KEY)
             Rs2TokenTypes.TRIGGER_SUBJECT -> arrayOf(TRIGGER_SUBJECT_KEY)
             Rs2TokenTypes.TRIGGER_SCRIPT_NAME -> arrayOf(TRIGGER_SCRIPT_NAME_KEY)
             Rs2TokenTypes.OPERATOR -> arrayOf(OPERATOR_KEY)

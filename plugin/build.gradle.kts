@@ -16,15 +16,7 @@ repositories {
 
 dependencies {
     intellijPlatform {
-        // For local development, point to your RustRover installation.
-        // CI builds use intellijIdeaCommunity instead.
-        val forceCI = providers.gradleProperty("forceCI").isPresent
-        val localIde = file("C:/Program Files/JetBrains/RustRover 2026.1.1")
-        if (!forceCI && localIde.exists()) {
-            local(localIde.absolutePath)
-        } else {
-            intellijIdea("2025.3")
-        }
+        intellijIdea("2026.1.2")
         bundledModule("intellij.spellchecker")
     }
 }
