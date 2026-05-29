@@ -7,6 +7,8 @@ import com.intellij.execution.configurations.ConfigurationTypeUtil
 import com.intellij.openapi.util.Ref
 import com.intellij.openapi.util.TextRange
 import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiDirectory
+import com.intellij.psi.PsiFile
 
 class Rs2TestRunConfigurationProducer : LazyRunConfigurationProducer<Rs2TestRunConfiguration>() {
 
@@ -19,8 +21,28 @@ class Rs2TestRunConfigurationProducer : LazyRunConfigurationProducer<Rs2TestRunC
         configuration: Rs2TestRunConfiguration,
         context: ConfigurationContext
     ): Boolean {
-        val testName = findTestLabelAt(context) ?: return false
-        return configuration.testFilter == testName
+        val element = context.psiLocation ?: return false
+
+        // Directory context
+        val dir = getDirFromContext(context)
+        if (dir != null) {
+            return configuration.testDir.isNotBlank() &&
+                    dir.virtualFile.path == configuration.testDir
+        }
+
+        val file = element.containingFile ?: return false
+        if (file.virtualFile?.extension != "rs2") return false
+        if (!fileHasTestScript(file)) return false
+
+        // Single test label context
+        val testName = findTestLabelAt(context)
+        if (testName != null) {
+            return configuration.testFilter == testName
+        }
+
+        // File context (not on a specific label)
+        return configuration.testFile.isNotBlank() &&
+                file.virtualFile?.path == configuration.testFile
     }
 
     override fun setupConfigurationFromContext(
@@ -28,10 +50,20 @@ class Rs2TestRunConfigurationProducer : LazyRunConfigurationProducer<Rs2TestRunC
         context: ConfigurationContext,
         sourceElement: Ref<PsiElement>
     ): Boolean {
+        // Directory context
+        val dir = getDirFromContext(context)
+        if (dir != null && dirHasTestScripts(dir)) {
+            configuration.testDir = dir.virtualFile.path
+            configuration.name = "RS2 Tests: ${dir.name}/"
+            return true
+        }
+
         val element = context.psiLocation ?: return false
         val file = element.containingFile ?: return false
         if (file.virtualFile?.extension != "rs2") return false
+        if (!fileHasTestScript(file)) return false
 
+        // Single test label
         val testName = findTestLabelAt(context)
         if (testName != null) {
             configuration.testFilter = testName
@@ -39,7 +71,10 @@ class Rs2TestRunConfigurationProducer : LazyRunConfigurationProducer<Rs2TestRunC
             return true
         }
 
-        return false
+        // Whole file
+        configuration.testFile = file.virtualFile.path
+        configuration.name = "RS2 Tests: ${file.virtualFile.name}"
+        return true
     }
 
     private fun findTestLabelAt(context: ConfigurationContext): String? {
@@ -55,5 +90,23 @@ class Rs2TestRunConfigurationProducer : LazyRunConfigurationProducer<Rs2TestRunC
         val lineText = doc.getText(TextRange(lineStart, lineEnd)).trim()
 
         return Rs2TestLineMarkerProvider.extractLabelName(lineText)
+    }
+
+    private fun getDirFromContext(context: ConfigurationContext): PsiDirectory? {
+        val location = context.location ?: return null
+        val psi = location.psiElement
+        if (psi is PsiDirectory) return psi
+        return null
+    }
+
+    private fun fileHasTestScript(file: PsiFile): Boolean {
+        val text = file.text
+        return text.startsWith("#testscript") || text.contains("\n#testscript")
+    }
+
+    private fun dirHasTestScripts(dir: PsiDirectory): Boolean {
+        return dir.files.any { f ->
+            f.virtualFile.extension == "rs2" && fileHasTestScript(f)
+        } || dir.subdirectories.any { dirHasTestScripts(it) }
     }
 }
