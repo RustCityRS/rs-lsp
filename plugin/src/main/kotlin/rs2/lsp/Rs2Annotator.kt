@@ -25,12 +25,32 @@ class Rs2Annotator : Annotator {
         val text = element.text
         val project = element.project
         val commands = Rs2CommandRegistry.getCommands(project)
+        val isBelowTest = Rs2TestLineMarkerProvider.isBelowTestScript(element)
 
         if (text in commands) {
+            if (!isBelowTest && Rs2TestScopeRegistry.isTestCommand(text)) {
+                holder.newAnnotation(HighlightSeverity.ERROR,
+                    "Test command '$text' can only be used below #testscript")
+                    .create()
+                return
+            }
             holder.newSilentAnnotation(HighlightSeverity.INFORMATION)
                 .textAttributes(Rs2SyntaxHighlighter.COMMAND_KEY)
                 .create()
             return
+        }
+
+        if (!isBelowTest) {
+            val prev = element.prevSibling
+            if (prev != null && prev.node?.elementType == Rs2TokenTypes.PROC_CALL) {
+                val testScripts = Rs2TestScopeRegistry.getTestScopedScripts(project)
+                if (text in testScripts) {
+                    holder.newAnnotation(HighlightSeverity.ERROR,
+                        "Cannot call test proc '~$text' from production code")
+                        .create()
+                    return
+                }
+            }
         }
 
         val entities = Rs2CommandRegistry.getEntities(project)

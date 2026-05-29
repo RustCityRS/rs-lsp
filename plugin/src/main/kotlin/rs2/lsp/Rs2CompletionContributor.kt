@@ -44,6 +44,7 @@ class Rs2CompletionProvider : CompletionProvider<CompletionParameters>() {
 
         // Determine the prefix being typed
         val typingPrefix = extractTypingPrefix(text, offset)
+        val belowTestScript = isBelowTestScript(text, offset)
 
         // Check if we're inside a function/proc argument list first
         val argContext = detectArgumentContext(text, offset)
@@ -52,12 +53,12 @@ class Rs2CompletionProvider : CompletionProvider<CompletionParameters>() {
             // After ~ (not inside parens) → suggest procs
             argContext == null && linePrefix.lastIndexOf('~') > linePrefix.lastIndexOf(' ').coerceAtLeast(linePrefix.lastIndexOf('(')) -> {
                 val prefix = text.substring(linePrefix.lastIndexOf('~') + lineStart + 1, offset)
-                addScriptCompletions(project, "proc", prefix, result)
+                addScriptCompletions(project, "proc", prefix, result, belowTestScript)
             }
             // After @ (not inside parens) → suggest labels
             argContext == null && linePrefix.lastIndexOf('@') > linePrefix.lastIndexOf(' ').coerceAtLeast(linePrefix.lastIndexOf('(')) -> {
                 val prefix = text.substring(linePrefix.lastIndexOf('@') + lineStart + 1, offset)
-                addScriptCompletions(project, "label", prefix, result)
+                addScriptCompletions(project, "label", prefix, result, belowTestScript)
             }
             // After ^ → suggest constants (works anywhere)
             linePrefix.lastIndexOf('^') > linePrefix.lastIndexOf(' ').coerceAtLeast(linePrefix.lastIndexOf('(')) -> {
@@ -87,14 +88,20 @@ class Rs2CompletionProvider : CompletionProvider<CompletionParameters>() {
             // Default: context-aware suggestions
             else -> {
                 if (argContext != null) {
-                    addContextualCompletions(project, typingPrefix, argContext, result)
+                    addContextualCompletions(project, typingPrefix, argContext, result, belowTestScript)
                 } else {
-                    addCommandCompletions(project, typingPrefix, result)
+                    addCommandCompletions(project, typingPrefix, result, belowTestScript)
                     addEntityCompletions(project, typingPrefix, result)
                     addKeywordCompletions(typingPrefix, result)
                 }
             }
         }
+    }
+
+    private fun isBelowTestScript(text: String, offset: Int): Boolean {
+        val markerPos = text.indexOf("\n#testscript")
+        if (markerPos >= 0) return offset > markerPos
+        return text.startsWith("#testscript")
     }
 
     private fun extractTypingPrefix(text: String, offset: Int): String {
@@ -103,10 +110,11 @@ class Rs2CompletionProvider : CompletionProvider<CompletionParameters>() {
         return text.substring(start + 1, offset)
     }
 
-    private fun addCommandCompletions(project: Project, prefix: String, result: CompletionResultSet) {
+    private fun addCommandCompletions(project: Project, prefix: String, result: CompletionResultSet, belowTestScript: Boolean = true) {
         val commands = Rs2CommandRegistry.getCommands(project)
         val prefixedResult = result.withPrefixMatcher(prefix)
         for (cmd in commands) {
+            if (!belowTestScript && Rs2TestScopeRegistry.isTestCommand(cmd)) continue
             prefixedResult.addElement(
                 LookupElementBuilder.create(cmd)
                     .withTypeText("command")
@@ -130,17 +138,18 @@ class Rs2CompletionProvider : CompletionProvider<CompletionParameters>() {
         }
     }
 
-    private fun addScriptCompletions(project: Project, trigger: String, prefix: String, result: CompletionResultSet) {
+    private fun addScriptCompletions(project: Project, trigger: String, prefix: String, result: CompletionResultSet, belowTestScript: Boolean = true) {
         val baseDir = project.guessProjectDir() ?: return
         val scriptsDir = baseDir.findFileByRelativePath("content/scripts") ?: return
         val prefixedResult = result.withPrefixMatcher(prefix)
-        collectScriptNames(scriptsDir, trigger, prefixedResult)
+        val testScoped = if (!belowTestScript) Rs2TestScopeRegistry.getTestScopedScripts(project) else emptySet()
+        collectScriptNames(scriptsDir, trigger, prefixedResult, testScoped)
     }
 
-    private fun collectScriptNames(dir: com.intellij.openapi.vfs.VirtualFile, trigger: String, result: CompletionResultSet) {
+    private fun collectScriptNames(dir: com.intellij.openapi.vfs.VirtualFile, trigger: String, result: CompletionResultSet, excludeNames: Set<String> = emptySet()) {
         for (child in dir.children) {
             if (child.isDirectory) {
-                collectScriptNames(child, trigger, result)
+                collectScriptNames(child, trigger, result, excludeNames)
             } else if (child.extension == "rs2") {
                 try {
                     child.inputStream.bufferedReader().useLines { lines ->
@@ -151,10 +160,12 @@ class Rs2CompletionProvider : CompletionProvider<CompletionParameters>() {
                                 if (end > 0) {
                                     val name = trimmed.substring("[$trigger,".length, end)
                                     val cleanName = name.split('(').first().trim()
-                                    result.addElement(
-                                        LookupElementBuilder.create(cleanName)
-                                            .withTypeText(trigger)
-                                    )
+                                    if (cleanName !in excludeNames) {
+                                        result.addElement(
+                                            LookupElementBuilder.create(cleanName)
+                                                .withTypeText(trigger)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -229,6 +240,7 @@ class Rs2CompletionProvider : CompletionProvider<CompletionParameters>() {
             "opobj1", "opobj2", "opobj3", "opobj4", "opobj5", "opobju", "opobjt",
             "apnpc1", "apnpc2", "apnpc3", "apnpc4", "apnpc5", "apnpcu", "apnpct",
             "if_button", "if_button1", "if_button2", "if_button3", "if_button4", "if_button5",
+            "if_button6", "if_button7", "if_button8", "if_button9", "if_button10",
             "if_close", "if_buttond", "inv_button1", "inv_button2", "inv_button3",
             "inv_button4", "inv_button5", "inv_buttond",
             "ai_timer", "ai_queue1", "ai_queue2", "ai_queue3", "ai_queue4", "ai_queue5",
@@ -373,7 +385,7 @@ class Rs2CompletionProvider : CompletionProvider<CompletionParameters>() {
     }
 
     private fun addContextualCompletions(
-        project: Project, prefix: String, ctx: ArgContext, result: CompletionResultSet
+        project: Project, prefix: String, ctx: ArgContext, result: CompletionResultSet, belowTestScript: Boolean = true
     ) {
         val paramTypes = if (ctx.isScript) {
             val scriptParams = Rs2CommandRegistry.getScriptParams(project)
@@ -385,7 +397,7 @@ class Rs2CompletionProvider : CompletionProvider<CompletionParameters>() {
 
         if (paramTypes == null || ctx.argIndex >= paramTypes.size) {
             // Unknown command/script or arg position — show everything
-            addCommandCompletions(project, prefix, result)
+            addCommandCompletions(project, prefix, result, belowTestScript)
             addEntityCompletions(project, prefix, result)
             addKeywordCompletions(prefix, result)
             return

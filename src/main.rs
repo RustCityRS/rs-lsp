@@ -200,6 +200,7 @@ impl Backend {
                     if let Ok(toks) = lx.tokenize() {
                         let mut pr = Parser::new(toks, &p);
                         if let Ok(f) = pr.parse() {
+                            let ts_line = find_testscript_line(source);
                             for s in &f.scripts {
                                 if s.trigger == "command" {
                                     continue;
@@ -211,6 +212,11 @@ impl Backend {
                                     pt,
                                     s.return_types.clone(),
                                 );
+                                if let Some(ts) = ts_line
+                                    && s.line >= ts
+                                {
+                                    new_registry.mark_test_script(&s.trigger, &s.name);
+                                }
                             }
                         }
                     }
@@ -228,6 +234,7 @@ impl Backend {
         }
 
         // Re-register + type check
+        let ts_line = find_testscript_line(text);
         let mut reg_guard = self.registry.write().await;
         if let Some(ref mut registry) = *reg_guard {
             for script in &file.scripts {
@@ -241,6 +248,11 @@ impl Backend {
                     param_types,
                     script.return_types.clone(),
                 );
+                if let Some(ts) = ts_line
+                    && script.line >= ts
+                {
+                    registry.mark_test_script(&script.trigger, &script.name);
+                }
             }
 
             for script in &file.scripts {
@@ -272,7 +284,8 @@ impl Backend {
             }
 
             let mut checker = TypeChecker::new(registry);
-            checker.check_file(&file, &file_path);
+            let ts_line = find_testscript_line(&text);
+            checker.check_file_with_test_boundary(&file, &file_path, ts_line);
             for diag in checker.diagnostics.diagnostics() {
                 let severity = match diag.severity {
                     Severity::Error => DiagnosticSeverity::ERROR,
@@ -473,6 +486,9 @@ async fn init_registry(
         };
         let mut parser = Parser::new(tokens, path);
         let Ok(file) = parser.parse() else { continue };
+        // Scripts at/below a `#testscript` marker are test-only; mark them so
+        // jumps/calls into them from production code are flagged.
+        let ts_line = find_testscript_line(&source);
         for script in &file.scripts {
             if script.trigger == "command" {
                 continue;
@@ -486,6 +502,11 @@ async fn init_registry(
                 param_types,
                 script.return_types.clone(),
             );
+            if let Some(ts) = ts_line
+                && script.line >= ts
+            {
+                registry.mark_test_script(&script.trigger, &script.name);
+            }
             let key = format!("script:{}", script.name);
             defs.insert(
                 key,
@@ -656,7 +677,8 @@ async fn init_registry(
             }
 
             let mut checker = TypeChecker::new(registry);
-            checker.check_file(&file, &file_path);
+            let ts_line = find_testscript_line(&text);
+            checker.check_file_with_test_boundary(&file, &file_path, ts_line);
             for diag in checker.diagnostics.diagnostics() {
                 let severity = match diag.severity {
                     Severity::Error => DiagnosticSeverity::ERROR,
@@ -1153,9 +1175,618 @@ fn find_local_var_definition(text: &str, var_name: &str, cursor_line: u32) -> Op
     None
 }
 
+fn find_testscript_line(source: &str) -> Option<usize> {
+    for (i, line) in source.lines().enumerate() {
+        if line.trim() == "#testscript" {
+            return Some(i + 1);
+        }
+    }
+    None
+}
+
 fn uri_to_path(uri: &Url) -> PathBuf {
     uri.to_file_path()
         .unwrap_or_else(|_| PathBuf::from(uri.path()))
+}
+
+// ─────────────────────── Code action helpers ───────────────────────
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Extract the text between the first pair of single quotes in a message.
+fn first_quoted(msg: &str) -> Option<String> {
+    let start = msg.find('\'')? + 1;
+    let end = msg[start..].find('\'')? + start;
+    Some(msg[start..end].to_string())
+}
+
+/// Classic Levenshtein edit distance (used to rank "did you mean" candidates).
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// Find names registered under `prefix` (e.g. "command:") in the definition
+/// index that are close to `name`, ranked by edit distance.
+fn fuzzy_matches(defs: &DefIndex, prefix: &str, name: &str, limit: usize) -> Vec<String> {
+    let name_l = name.to_lowercase();
+    let threshold = (name.len() / 3).max(2);
+    let mut scored: Vec<(usize, String)> = defs
+        .keys()
+        .filter_map(|k| k.strip_prefix(prefix))
+        .filter(|cand| *cand != name)
+        .map(|cand| (levenshtein(&name_l, &cand.to_lowercase()), cand.to_string()))
+        .filter(|(d, _)| *d <= threshold)
+        .collect();
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    scored.dedup_by(|a, b| a.1 == b.1);
+    scored.into_iter().take(limit).map(|(_, s)| s).collect()
+}
+
+/// Locate the precise span of `bare` on the diagnostic's start line.
+/// Locate the precise span of `bare` on the diagnostic's start line, honoring
+/// sigil context: with `sigil = Some(s)` the match must be preceded by `s`
+/// (e.g. `~myproc`); with `None` the match must be a bare token NOT preceded
+/// by any sigil (`$ ~ @ ^ %`) — so `coordx` in `def_int $coordx = coordx`
+/// resolves to the command on the right, not the `$coordx` variable name.
+fn find_name_range(
+    lines: &[&str],
+    diag: &Diagnostic,
+    bare: &str,
+    sigil: Option<char>,
+) -> Option<Range> {
+    let line_idx = diag.range.start.line as usize;
+    let line = lines.get(line_idx)?;
+    let bytes = line.as_bytes();
+    let mut start = 0;
+    while let Some(idx) = line[start..].find(bare) {
+        let col = start + idx;
+        let after = col + bare.len();
+        let after_ok = after >= line.len() || !is_ident_byte(bytes[after]);
+        let prev = col.checked_sub(1).map(|i| bytes[i]);
+        let before_ok = match sigil {
+            Some(s) => prev == Some(s as u8),
+            None => match prev {
+                None => true,
+                Some(b) => {
+                    !is_ident_byte(b) && !matches!(b, b'$' | b'~' | b'@' | b'^' | b'%')
+                }
+            },
+        };
+        if before_ok && after_ok {
+            return Some(Range {
+                start: Position { line: line_idx as u32, character: col as u32 },
+                end: Position { line: line_idx as u32, character: after as u32 },
+            });
+        }
+        start = after;
+    }
+    None
+}
+
+/// Position at the very end of the document (for end-of-file insertions).
+fn end_position(text: &str) -> Position {
+    let line = text.matches('\n').count() as u32;
+    let last_line_len = text.rsplit('\n').next().unwrap_or("").chars().count() as u32;
+    Position { line, character: last_line_len }
+}
+
+fn single_file_edit(uri: &Url, edits: Vec<TextEdit>) -> WorkspaceEdit {
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(uri.clone(), edits);
+    WorkspaceEdit {
+        changes: Some(changes),
+        document_changes: None,
+        change_annotations: None,
+    }
+}
+
+fn quickfix(
+    title: String,
+    kind: CodeActionKind,
+    edit: WorkspaceEdit,
+    diag: Option<&Diagnostic>,
+) -> CodeActionOrCommand {
+    CodeActionOrCommand::CodeAction(CodeAction {
+        title,
+        kind: Some(kind),
+        diagnostics: diag.map(|d| vec![d.clone()]),
+        edit: Some(edit),
+        command: None,
+        is_preferred: None,
+        disabled: None,
+        data: None,
+    })
+}
+
+/// "Did you mean …?" replacement suggestions for an unresolved symbol.
+fn push_did_you_mean(
+    actions: &mut Vec<CodeActionOrCommand>,
+    uri: &Url,
+    lines: &[&str],
+    diag: &Diagnostic,
+    defs: &DefIndex,
+    prefix: &str,
+    bare: &str,
+    sigil: Option<char>,
+) {
+    let Some(range) = find_name_range(lines, diag, bare, sigil) else {
+        return;
+    };
+    for cand in fuzzy_matches(defs, prefix, bare, 5) {
+        let title = match sigil {
+            Some(s) => format!("Change to '{s}{cand}'"),
+            None => format!("Change to '{cand}'"),
+        };
+        let edit = TextEdit {
+            range,
+            new_text: cand,
+        };
+        actions.push(quickfix(
+            title,
+            CodeActionKind::QUICKFIX,
+            single_file_edit(uri, vec![edit]),
+            Some(diag),
+        ));
+    }
+}
+
+/// Generate a stub `[proc,name]` / `[label,name]`. Inserted before a
+/// `#testscript` marker if present (so it stays in production code),
+/// otherwise at the end of the file.
+fn push_create_script(
+    actions: &mut Vec<CodeActionOrCommand>,
+    uri: &Url,
+    text: &str,
+    name: &str,
+    trigger: &str,
+) {
+    let stub_body = if trigger == "proc" {
+        format!("[proc,{name}]\nreturn;\n")
+    } else {
+        format!("[label,{name}]\n")
+    };
+    // `find_testscript_line` returns the 1-based line after the marker;
+    // subtract 1 to land on the marker line itself.
+    let (pos, new_text) = match find_testscript_line(text).map(|l| l - 1) {
+        Some(marker_line) => (
+            Position { line: marker_line as u32, character: 0 },
+            format!("{stub_body}\n"),
+        ),
+        None => (end_position(text), format!("\n{stub_body}")),
+    };
+    let edit = TextEdit {
+        range: Range { start: pos, end: pos },
+        new_text,
+    };
+    actions.push(quickfix(
+        format!("Create {trigger} '{name}'"),
+        CodeActionKind::QUICKFIX,
+        single_file_edit(uri, vec![edit]),
+        None,
+    ));
+}
+
+/// Offer to wrap a bare unresolved identifier in quotes (string literal).
+fn push_quote_as_string(
+    actions: &mut Vec<CodeActionOrCommand>,
+    uri: &Url,
+    lines: &[&str],
+    diag: &Diagnostic,
+    bare: &str,
+) {
+    let Some(range) = find_name_range(lines, diag, bare, None) else {
+        return;
+    };
+    let edit = TextEdit {
+        range,
+        new_text: format!("\"{bare}\""),
+    };
+    actions.push(quickfix(
+        format!("Convert '{bare}' to string literal \"{bare}\""),
+        CodeActionKind::QUICKFIX,
+        single_file_edit(uri, vec![edit]),
+        Some(diag),
+    ));
+}
+
+/// For a type mismatch on a `def_<given>` declaration, offer to change the
+/// declared type to the expected one.
+fn push_type_mismatch_fixes(
+    actions: &mut Vec<CodeActionOrCommand>,
+    uri: &Url,
+    lines: &[&str],
+    diag: &Diagnostic,
+    msg: &str,
+) {
+    let parts: Vec<&str> = msg.split('\'').collect();
+    let (Some(given), Some(expected)) = (parts.get(1), parts.get(3)) else {
+        return;
+    };
+    if given.contains("arg(s)") || expected.contains("arg(s)") {
+        return;
+    }
+    let line_idx = diag.range.start.line as usize;
+    let Some(line) = lines.get(line_idx) else {
+        return;
+    };
+    let needle = format!("def_{given}");
+    if let Some(col) = line.find(&needle) {
+        let range = Range {
+            start: Position { line: line_idx as u32, character: col as u32 },
+            end: Position {
+                line: line_idx as u32,
+                character: (col + needle.len()) as u32,
+            },
+        };
+        let edit = TextEdit {
+            range,
+            new_text: format!("def_{expected}"),
+        };
+        actions.push(quickfix(
+            format!("Change declared type to 'def_{expected}'"),
+            CodeActionKind::QUICKFIX,
+            single_file_edit(uri, vec![edit]),
+            Some(diag),
+        ));
+    }
+}
+
+/// Find the header line (`[trigger,name]`) of the script enclosing `start_line`.
+fn find_enclosing_header(lines: &[&str], start_line: usize) -> Option<usize> {
+    let upper = start_line.min(lines.len().saturating_sub(1));
+    for i in (0..=upper).rev() {
+        let t = lines[i].trim_start();
+        if t.starts_with('[') && t.contains(',') && t.contains(']') {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Collect `$vars` used in `body` that are NOT declared (`def_…`) within it,
+/// preserving first-occurrence order. These become extracted-proc parameters.
+fn free_vars(body: &str) -> Vec<String> {
+    let bytes = body.as_bytes();
+    let mut declared = std::collections::HashSet::new();
+    let mut used = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut i = 0;
+    while i < body.len() {
+        if bytes[i] == b'$' {
+            let start = i + 1;
+            let mut j = start;
+            while j < body.len() && is_ident_byte(bytes[j]) {
+                j += 1;
+            }
+            if j > start {
+                let name = body[start..j].to_string();
+                // Determine the token immediately preceding `$`.
+                let mut p = i;
+                while p > 0 && (bytes[p - 1] as char).is_whitespace() {
+                    p -= 1;
+                }
+                let mut k = p;
+                while k > 0 && is_ident_byte(bytes[k - 1]) {
+                    k -= 1;
+                }
+                let prev = &body[k..p];
+                if prev.starts_with("def_") {
+                    declared.insert(name);
+                } else if seen.insert(name.clone()) {
+                    used.push(name);
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    used.into_iter().filter(|n| !declared.contains(n)).collect()
+}
+
+/// Look up the declared type of `$var` in `region` (e.g. `def_obj $var` or a
+/// `(obj $var)` parameter). Returns the bare type name (sans `def_`).
+fn find_var_type(region: &str, var: &str) -> Option<String> {
+    let needle = format!("${var}");
+    let bytes = region.as_bytes();
+    let mut search = 0;
+    while let Some(rel) = region[search..].find(&needle) {
+        let pos = search + rel;
+        let after = pos + needle.len();
+        let boundary = after >= region.len() || !is_ident_byte(bytes[after]);
+        // A declaration has a type token followed by whitespace before `$`.
+        if boundary && pos > 0 && (bytes[pos - 1] as char).is_whitespace() {
+            let mut j = pos - 1;
+            while j > 0 && (bytes[j] as char).is_whitespace() {
+                j -= 1;
+            }
+            if !(bytes[j] as char).is_whitespace() {
+                let end = j + 1;
+                let mut k = end;
+                while k > 0 && is_ident_byte(bytes[k - 1]) {
+                    k -= 1;
+                }
+                let tok = &region[k..end];
+                let ty = tok.strip_prefix("def_").unwrap_or(tok);
+                if !ty.is_empty()
+                    && ty.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                    && ty.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    return Some(ty.to_string());
+                }
+            }
+        }
+        search = after;
+    }
+    None
+}
+
+/// Split a string on top-level commas (ignoring those nested in parens/strings).
+fn split_top_commas(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut cur = String::new();
+    for c in s.chars() {
+        match c {
+            '"' => {
+                in_str = !in_str;
+                cur.push(c);
+            }
+            '(' if !in_str => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' if !in_str => {
+                depth -= 1;
+                cur.push(c);
+            }
+            ',' if !in_str && depth == 0 => {
+                out.push(std::mem::take(&mut cur));
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Find the argument list of the first `return(...)` in `body`.
+fn first_return_values(body: &str) -> Option<Vec<String>> {
+    let bytes = body.as_bytes();
+    let mut search = 0;
+    while let Some(rel) = body[search..].find("return") {
+        let pos = search + rel;
+        let before_ok = pos == 0 || !is_ident_byte(bytes[pos - 1]);
+        let mut k = pos + 6;
+        while k < body.len() && (bytes[k] as char).is_whitespace() {
+            k += 1;
+        }
+        if before_ok && k < body.len() && bytes[k] == b'(' {
+            let start = k + 1;
+            let mut depth = 0i32;
+            let mut m = k;
+            while m < body.len() {
+                match bytes[m] {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(split_top_commas(&body[start..m]));
+                        }
+                    }
+                    _ => {}
+                }
+                m += 1;
+            }
+        }
+        search = pos + 6;
+    }
+    None
+}
+
+/// Best-effort type inference for a single return/argument expression.
+fn infer_value_type(val: &str, region: &str, registry: Option<&SymbolRegistry>) -> String {
+    let v = val.trim();
+    if v.is_empty() {
+        return String::new();
+    }
+    if v == "true" || v == "false" {
+        return "boolean".to_string();
+    }
+    if v.starts_with('"') {
+        return "string".to_string();
+    }
+    if v.parse::<i64>().is_ok() {
+        return "int".to_string();
+    }
+    if let Some(rest) = v.strip_prefix('$') {
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        return find_var_type(region, &name).unwrap_or_else(|| "int".to_string());
+    }
+    // Bare identifier — try the entity registry (obj/npc/loc/…).
+    if v.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        if let Some(reg) = registry {
+            if let Some(sym) = reg.lookup_entity_id(v) {
+                if let runec::symbol::SymbolKind::Constant { const_type, .. } = &sym.kind {
+                    return const_type.name().to_string();
+                }
+            }
+        }
+    }
+    "int".to_string()
+}
+
+/// A valid default-value literal placeholder for a parameter of the given
+/// type, so the generated call compiles as-is (e.g. string → `""`, int → `0`).
+fn placeholder_literal(t: runec::types::Type) -> &'static str {
+    use runec::types::{BaseVarType, Type};
+    match t.base_type() {
+        BaseVarType::String => "\"\"",
+        BaseVarType::Long => "0",
+        BaseVarType::Integer => {
+            if t == Type::Boolean {
+                "false"
+            } else {
+                "0"
+            }
+        }
+    }
+}
+
+/// Quick fix for a bare command used as a value: replace `name` with a call
+/// `name(<defaults>)` whose arguments are valid placeholder literals built
+/// from the command's parameter types (e.g. `mes` → `mes("")`).
+fn push_call_with_args(
+    actions: &mut Vec<CodeActionOrCommand>,
+    uri: &Url,
+    lines: &[&str],
+    diag: &Diagnostic,
+    name: &str,
+    registry: Option<&SymbolRegistry>,
+) {
+    let Some(range) = find_name_range(lines, diag, name, None) else {
+        return;
+    };
+    // Build the argument list from default literals for each parameter type.
+    let arg_list = registry
+        .and_then(|reg| reg.lookup_command(name).cloned())
+        .and_then(|sym| match sym.kind {
+            runec::symbol::SymbolKind::Command { param_types, .. } => Some(
+                param_types
+                    .iter()
+                    .map(|t| placeholder_literal(*t))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let new_text = format!("{name}({arg_list})");
+    actions.push(quickfix(
+        format!("Call '{name}' with arguments — {new_text}"),
+        CodeActionKind::QUICKFIX,
+        single_file_edit(uri, vec![TextEdit { range, new_text }]),
+        Some(diag),
+    ));
+}
+
+/// Extract the selected lines into a new proc/label, inferring parameters from
+/// referenced locals and (for procs) the return type from `return(...)`. The
+/// new script is inserted just before the enclosing script header so it stays
+/// in the same section (never after `#testscript`).
+fn build_extract_action(
+    uri: &Url,
+    lines: &[&str],
+    range: Range,
+    trigger: &str,
+    registry: Option<&SymbolRegistry>,
+) -> Option<CodeActionOrCommand> {
+    let start_line = range.start.line as usize;
+    let mut end_line = range.end.line as usize;
+    // A selection ending at column 0 doesn't include that final line.
+    if range.end.character == 0 && end_line > start_line {
+        end_line -= 1;
+    }
+    if end_line >= lines.len() {
+        return None;
+    }
+    let body = lines[start_line..=end_line].join("\n");
+    if body.trim().is_empty() {
+        return None;
+    }
+
+    let header_line = find_enclosing_header(lines, start_line)?;
+    // Region used for type inference: the enclosing script up to the selection.
+    let region = lines[header_line..=end_line].join("\n");
+
+    // Parameters: free locals referenced in the body, typed from the region.
+    let params = free_vars(&body);
+    let param_decls: Vec<String> = params
+        .iter()
+        .map(|p| {
+            let ty = find_var_type(&region, p).unwrap_or_else(|| "int".to_string());
+            format!("{ty} ${p}")
+        })
+        .collect();
+    let call_args = if params.is_empty() {
+        String::new()
+    } else {
+        format!("({})", params.iter().map(|p| format!("${p}")).collect::<Vec<_>>().join(", "))
+    };
+
+    // Return type (procs only): inferred from the first return statement.
+    let ret_types: Vec<String> = if trigger == "proc" {
+        first_return_values(&body)
+            .map(|vals| {
+                vals.iter()
+                    .map(|v| infer_value_type(v, &region, registry))
+                    .filter(|t| !t.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let name = format!("extracted_{trigger}");
+    let sigil = if trigger == "proc" { "~" } else { "@" };
+    let call = format!("{sigil}{name}{call_args}");
+
+    // Build the new script header signature.
+    let mut signature = String::new();
+    if !param_decls.is_empty() {
+        signature.push_str(&format!("({})", param_decls.join(", ")));
+    } else if !ret_types.is_empty() {
+        signature.push_str("()");
+    }
+    if !ret_types.is_empty() {
+        signature.push_str(&format!("({})", ret_types.join(", ")));
+    }
+
+    // Replace the selected lines with the call.
+    let end_char = lines[end_line].chars().count() as u32;
+    let replace_edit = TextEdit {
+        range: Range {
+            start: Position { line: start_line as u32, character: 0 },
+            end: Position { line: end_line as u32, character: end_char },
+        },
+        new_text: call,
+    };
+
+    // Insert the new script just before the enclosing header.
+    let new_script = format!("[{trigger},{name}]{signature}\n{body}\n\n");
+    let insert_pos = Position { line: header_line as u32, character: 0 };
+    let insert_edit = TextEdit {
+        range: Range { start: insert_pos, end: insert_pos },
+        new_text: new_script,
+    };
+
+    Some(quickfix(
+        format!("Extract selection to {trigger}"),
+        CodeActionKind::REFACTOR_EXTRACT,
+        single_file_edit(uri, vec![insert_edit, replace_edit]),
+        None,
+    ))
 }
 
 fn index_constant_files(scripts_dir: &Path, defs: &mut DefIndex) {
@@ -1258,6 +1889,16 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Options(
+                    CodeActionOptions {
+                        code_action_kinds: Some(vec![
+                            CodeActionKind::QUICKFIX,
+                            CodeActionKind::REFACTOR_EXTRACT,
+                        ]),
+                        work_done_progress_options: Default::default(),
+                        resolve_provider: Some(false),
+                    },
+                )),
                 // inlay hints provided by the plugin, not the LSP
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
@@ -1346,6 +1987,7 @@ impl LanguageServer for Backend {
             if let Ok(tokens) = lexer.tokenize() {
                 let mut parser = Parser::new(tokens, &file_path);
                 if let Ok(file) = parser.parse() {
+                    let ts_line = find_testscript_line(&text);
                     for script in &file.scripts {
                         if script.trigger == "command" {
                             continue;
@@ -1357,6 +1999,11 @@ impl LanguageServer for Backend {
                             param_types,
                             script.return_types.clone(),
                         );
+                        if let Some(ts) = ts_line
+                            && script.line >= ts
+                        {
+                            registry.mark_test_script(&script.trigger, &script.name);
+                        }
                     }
                 }
             }
@@ -1716,6 +2363,96 @@ impl LanguageServer for Backend {
         }
     }
 
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+    ) -> Result<Option<CodeActionResponse>> {
+        let uri = &params.text_document.uri;
+        let Some(text) = self.documents.get(uri).map(|v| v.clone()) else {
+            return Ok(None);
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let defs = self.definitions.read().await;
+        let reg_guard = self.registry.read().await;
+        let registry = reg_guard.as_ref();
+        let mut actions: Vec<CodeActionOrCommand> = Vec::new();
+
+        // A "test proc/label/command from production code" error has no valid
+        // quick fix — the only remedy is moving the code, which the message
+        // already states. Offer nothing here (not even extract), so the user
+        // just sees "not allowed in production".
+        if params
+            .context
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("from production code"))
+        {
+            return Ok(None);
+        }
+
+        // ── Quick fixes derived from the diagnostics under the cursor ──
+        for diag in &params.context.diagnostics {
+            let msg = &diag.message;
+            // Bare command used as a value — offer to call it with an argument
+            // template built from the command's parameter types.
+            if msg.contains("used here as a bare value") {
+                if let Some(name) = first_quoted(msg) {
+                    push_call_with_args(&mut actions, uri, &lines, diag, &name, registry);
+                }
+                continue;
+            }
+            let Some(raw) = first_quoted(msg) else {
+                // Diagnostics without a quoted symbol still get type-mismatch handling below.
+                if msg.starts_with("Type mismatch:") {
+                    push_type_mismatch_fixes(&mut actions, uri, &lines, diag, msg);
+                }
+                continue;
+            };
+            // Strip any leading sigil (~ @ ^ % $) to get the bare name.
+            let sigil = raw.chars().next().filter(|c| "~@^%$".contains(*c));
+            let bare = match sigil {
+                Some(_) => &raw[1..],
+                None => &raw[..],
+            };
+
+            if msg.contains("cannot be resolved to a command.") {
+                push_did_you_mean(&mut actions, uri, &lines, diag, &defs, "command:", bare, sigil);
+            } else if msg.contains("cannot be resolved to a proc.") {
+                push_did_you_mean(&mut actions, uri, &lines, diag, &defs, "script:", bare, sigil);
+                push_create_script(&mut actions, uri, &text, bare, "proc");
+            } else if msg.contains("cannot be resolved to a label.") {
+                push_did_you_mean(&mut actions, uri, &lines, diag, &defs, "script:", bare, sigil);
+                push_create_script(&mut actions, uri, &text, bare, "label");
+            } else if msg.contains("cannot be resolved to a constant.") {
+                push_did_you_mean(&mut actions, uri, &lines, diag, &defs, "constant:", bare, sigil);
+            } else if msg.contains("could not be resolved to a symbol.") {
+                // Could be an entity, command, or constant — try all, plus
+                // offer to quote it as a string literal.
+                push_did_you_mean(&mut actions, uri, &lines, diag, &defs, "entity:", bare, sigil);
+                push_did_you_mean(&mut actions, uri, &lines, diag, &defs, "command:", bare, sigil);
+                push_quote_as_string(&mut actions, uri, &lines, diag, bare);
+            } else if msg.starts_with("Type mismatch:") {
+                push_type_mismatch_fixes(&mut actions, uri, &lines, diag, msg);
+            }
+        }
+
+        // ── Extract refactoring for a non-empty selection ──
+        if params.range.start != params.range.end {
+            if let Some(a) = build_extract_action(uri, &lines, params.range, "proc", registry) {
+                actions.push(a);
+            }
+            if let Some(a) = build_extract_action(uri, &lines, params.range, "label", registry) {
+                actions.push(a);
+            }
+        }
+
+        if actions.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(actions))
+        }
+    }
+
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         let uri = &params.text_document.uri;
         let range = params.range;
@@ -1984,4 +2721,150 @@ async fn main() {
 
     let (service, socket) = LspService::new(Backend::new);
     Server::new(stdin, stdout, socket).serve(service).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_quoted_extracts_name() {
+        assert_eq!(
+            first_quoted("'badcmd' cannot be resolved to a command.").as_deref(),
+            Some("badcmd")
+        );
+        assert_eq!(
+            first_quoted("'~myproc' cannot be resolved to a proc.").as_deref(),
+            Some("~myproc")
+        );
+        assert_eq!(first_quoted("no quotes here"), None);
+    }
+
+    #[test]
+    fn levenshtein_basic() {
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+        assert_eq!(levenshtein("mes", "mes"), 0);
+        assert_eq!(levenshtein("mesbox", "mesb0x"), 1);
+    }
+
+    #[test]
+    fn fuzzy_matches_ranks_by_distance() {
+        let mut defs: DefIndex = std::collections::HashMap::new();
+        for n in ["mes", "mesbox", "chatnpc", "npc_say"] {
+            defs.insert(
+                format!("command:{n}"),
+                DefinitionLocation { path: PathBuf::new(), line: 0 },
+            );
+        }
+        // "mesbax" should suggest "mesbox" (distance 1) before others.
+        let got = fuzzy_matches(&defs, "command:", "mesbax", 5);
+        assert_eq!(got.first().map(|s| s.as_str()), Some("mesbox"));
+        // exact name is excluded
+        assert!(!fuzzy_matches(&defs, "command:", "mes", 5).contains(&"mes".to_string()));
+    }
+
+    #[test]
+    fn end_position_handles_trailing_newline() {
+        assert_eq!(end_position("a\n"), Position { line: 1, character: 0 });
+        assert_eq!(end_position("a"), Position { line: 0, character: 1 });
+        assert_eq!(end_position("a\nbc"), Position { line: 1, character: 2 });
+    }
+
+    #[test]
+    fn find_name_range_locates_whole_word() {
+        let lines = vec!["~myproc(5)"];
+        let diag = Diagnostic {
+            range: Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 0, character: 10 },
+            },
+            ..Default::default()
+        };
+        // With sigil '~', the match is the `~myproc` occurrence (col 1..7).
+        let r = find_name_range(&lines, &diag, "myproc", Some('~')).unwrap();
+        assert_eq!(r.start.character, 1);
+        assert_eq!(r.end.character, 7);
+    }
+
+    #[test]
+    fn find_name_range_skips_variable_with_same_name() {
+        // `def_int $coordx = coordx;` — the bare command fix (sigil None) must
+        // target the RHS `coordx`, not the `$coordx` variable name.
+        let lines = vec!["def_int $coordx = coordx;"];
+        let diag = Diagnostic {
+            range: Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 0, character: 25 },
+            },
+            ..Default::default()
+        };
+        let r = find_name_range(&lines, &diag, "coordx", None).unwrap();
+        // `$coordx` starts at index 9 (the `coordx` at col 9 is preceded by `$`),
+        // the command `coordx` is at col 18.
+        assert_eq!(r.start.character, 18);
+        assert_eq!(r.end.character, 24);
+    }
+
+    #[test]
+    fn placeholder_literals_are_valid_defaults() {
+        use runec::types::Type;
+        assert_eq!(placeholder_literal(Type::String), "\"\"");
+        assert_eq!(placeholder_literal(Type::Int), "0");
+        assert_eq!(placeholder_literal(Type::Boolean), "false");
+        assert_eq!(placeholder_literal(Type::Long), "0");
+        // Named integer-base types fall back to 0 (widens to the named type).
+        assert_eq!(placeholder_literal(Type::Coord), "0");
+        assert_eq!(placeholder_literal(Type::Obj), "0");
+    }
+
+    #[test]
+    fn free_vars_excludes_locally_declared() {
+        let body = "def_int $mult = ~wc_hatchet_power($hatchet)\nif ($hatchet = dragon_hatchet) {\n  return($mult)\n}";
+        let got = free_vars(body);
+        // $hatchet is used but never declared in the body → a parameter.
+        // $mult is declared (def_int) → not a parameter.
+        assert_eq!(got, vec!["hatchet".to_string()]);
+    }
+
+    #[test]
+    fn find_var_type_from_param_and_def() {
+        let header = "[proc,wc_hatchet_power](obj $hatchet)(int)\ndef_int $mult = 0";
+        assert_eq!(find_var_type(header, "hatchet").as_deref(), Some("obj"));
+        assert_eq!(find_var_type(header, "mult").as_deref(), Some("int"));
+        // A pure usage (no preceding type) yields nothing.
+        assert_eq!(find_var_type("return($hatchet)", "hatchet"), None);
+    }
+
+    #[test]
+    fn first_return_values_parses_args() {
+        let body = "if ($x = 1) {\n  return(385)\n}\nreturn(100)";
+        assert_eq!(first_return_values(body), Some(vec!["385".to_string()]));
+        let multi = "return(coord, $idx)";
+        assert_eq!(
+            first_return_values(multi),
+            Some(vec!["coord".to_string(), " $idx".to_string()])
+        );
+    }
+
+    #[test]
+    fn infer_value_type_handles_literals_and_vars() {
+        let region = "def_obj $hatchet = 0";
+        assert_eq!(infer_value_type("385", region, None), "int");
+        assert_eq!(infer_value_type("\"hi\"", region, None), "string");
+        assert_eq!(infer_value_type("true", region, None), "boolean");
+        assert_eq!(infer_value_type("$hatchet", region, None), "obj");
+        // unknown bare identifier with no registry → defaults to int
+        assert_eq!(infer_value_type("mystery", region, None), "int");
+    }
+
+    #[test]
+    fn find_enclosing_header_scans_upward() {
+        let lines = vec![
+            "[proc,foo](obj $x)(int)",
+            "def_int $y = 1",
+            "return($y)",
+        ];
+        assert_eq!(find_enclosing_header(&lines, 2), Some(0));
+        assert_eq!(find_enclosing_header(&lines, 0), Some(0));
+    }
 }

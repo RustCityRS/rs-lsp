@@ -22,6 +22,7 @@ class Rs2VfsListener : BulkFileListener {
                 if (project.isDisposed) continue
 
                 Rs2CommandRegistry.invalidate(project)
+                Rs2TestScopeRegistry.invalidate(project)
 
                 LspServerManager.getInstance(project)
                     .stopAndRestartIfNeeded(Rs2LspServerSupportProvider::class.java)
