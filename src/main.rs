@@ -351,7 +351,7 @@ impl Backend {
             let Ok(file) = parser.parse() else { return };
 
             // Compile + lint
-            let mut codegen = Compiler::new(registry.clone());
+            let mut codegen = Compiler::new(registry);
             let mut compiled_scripts = Vec::new();
             let path_key = file_path.to_string_lossy().into_owned();
             for script in &file.scripts {
@@ -364,9 +364,12 @@ impl Backend {
             }
             if !compiled_scripts.is_empty() {
                 {
-                    let mut source_cache_rc = std::collections::HashMap::new();
-                    source_cache_rc.insert(path_key.clone(), std::rc::Rc::new(text_owned.clone()));
-                    let lint_diags = lints::run_lints(&compiled_scripts, Some(&source_cache_rc));
+                    let mut source_cache = std::collections::HashMap::new();
+                    source_cache.insert(path_key.clone(), std::sync::Arc::new(text_owned.clone()));
+                    let lint_diags = lints::run_lints(
+                        &compiled_scripts,
+                        Some(runec::SourceProvider::Eager(&source_cache)),
+                    );
                     for diag in lint_diags.diagnostics() {
                         all_diagnostics.push(make_diagnostic_with_source(
                             diag.line,
@@ -382,13 +385,14 @@ impl Backend {
                 let all_compiled = all_compiled_clone.read().await;
                 if !all_compiled.is_empty() {
                     let sources = all_sources_clone.read().await;
-                    let rc_cache: std::collections::HashMap<String, std::rc::Rc<String>> = sources
-                        .iter()
-                        .map(|(k, v)| (k.clone(), std::rc::Rc::new(v.clone())))
-                        .collect();
+                    let arc_cache: std::collections::HashMap<String, std::sync::Arc<String>> =
+                        sources
+                            .iter()
+                            .map(|(k, v)| (k.clone(), std::sync::Arc::new(v.clone())))
+                            .collect();
                     drop(sources);
                     let mut ptr_checker = PointerChecker::new(&all_compiled, registry);
-                    ptr_checker.set_source_cache(&rc_cache);
+                    ptr_checker.set_source_cache(runec::SourceProvider::Eager(&arc_cache));
                     let pointer_diags = ptr_checker.run();
                     let file_path_str = file_path.to_string_lossy();
                     for diag in pointer_diags.diagnostics() {
@@ -438,8 +442,10 @@ async fn init_registry(
     let mut registry = SymbolRegistry::new();
 
     symloader::load_packs(&mut registry, &pack_dir);
-    symloader::load_constant_files(&mut registry, &scripts_dir);
-    symloader::load_game_var_types(&mut registry, &scripts_dir);
+    let mut config_files: Vec<std::path::PathBuf> = Vec::new();
+    symloader::collect_all_files(&scripts_dir, &mut config_files);
+    symloader::load_constant_files(&mut registry, &config_files);
+    symloader::load_game_var_types(&mut registry, &config_files);
 
     let engine_rs2 = scripts_dir.join("engine.rs2");
     if engine_rs2.exists() {
@@ -590,7 +596,7 @@ async fn init_registry(
     index_constant_files(&scripts_dir, &mut defs);
     // Compile all scripts for cross-file pointer checking
     info!("Compiling all scripts for pointer checker...");
-    let mut codegen = Compiler::new(registry.clone());
+    let mut codegen = Compiler::new(&registry);
     let mut all_compiled = Vec::new();
     let mut all_sources_map = std::collections::HashMap::new();
 
@@ -695,7 +701,7 @@ async fn init_registry(
             }
 
             // Lints (per-file)
-            let mut codegen = Compiler::new(registry.clone());
+            let mut codegen = Compiler::new(registry);
             let mut compiled_scripts = Vec::new();
             let path_key = file_path.to_string_lossy().into_owned();
             for script in &file.scripts {
@@ -708,8 +714,11 @@ async fn init_registry(
             }
             if !compiled_scripts.is_empty() {
                 let mut source_cache = std::collections::HashMap::new();
-                source_cache.insert(path_key.clone(), std::rc::Rc::new(text.clone()));
-                let lint_diags = lints::run_lints(&compiled_scripts, Some(&source_cache));
+                source_cache.insert(path_key.clone(), std::sync::Arc::new(text.clone()));
+                let lint_diags = lints::run_lints(
+                    &compiled_scripts,
+                    Some(runec::SourceProvider::Eager(&source_cache)),
+                );
                 for diag in lint_diags.diagnostics() {
                     lsp_diagnostics.push(make_diagnostic_with_source(
                         diag.line,
@@ -725,12 +734,12 @@ async fn init_registry(
             let all_compiled = all_compiled_lock.read().await;
             if !all_compiled.is_empty() {
                 let sources = all_sources_lock.read().await;
-                let rc_cache: std::collections::HashMap<String, std::rc::Rc<String>> = sources
+                let arc_cache: std::collections::HashMap<String, std::sync::Arc<String>> = sources
                     .iter()
-                    .map(|(k, v)| (k.clone(), std::rc::Rc::new(v.clone())))
+                    .map(|(k, v)| (k.clone(), std::sync::Arc::new(v.clone())))
                     .collect();
                 let mut checker = PointerChecker::new(&all_compiled, registry);
-                checker.set_source_cache(&rc_cache);
+                checker.set_source_cache(runec::SourceProvider::Eager(&arc_cache));
                 let pointer_diags = checker.run();
                 let file_path_str = file_path.to_string_lossy();
                 for diag in pointer_diags.diagnostics() {
@@ -1626,10 +1635,8 @@ fn infer_value_type(val: &str, region: &str, registry: Option<&SymbolRegistry>) 
     // Bare identifier — try the entity registry (obj/npc/loc/…).
     if v.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         if let Some(reg) = registry {
-            if let Some(sym) = reg.lookup_entity_id(v) {
-                if let runec::symbol::SymbolKind::Constant { const_type, .. } = &sym.kind {
-                    return const_type.name().to_string();
-                }
+            if let Some(eref) = reg.lookup_entity_id(v) {
+                return eref.const_type.name().to_string();
             }
         }
     }
@@ -2017,7 +2024,7 @@ impl LanguageServer for Backend {
             if let Ok(tokens) = lexer.tokenize() {
                 let mut parser = Parser::new(tokens, &file_path);
                 if let Ok(file) = parser.parse() {
-                    let mut codegen = Compiler::new(registry.clone());
+                    let mut codegen = Compiler::new(registry);
                     let path_key = file_path.to_string_lossy().into_owned();
                     let mut new_compiled = Vec::new();
                     for script in &file.scripts {
