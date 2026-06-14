@@ -640,9 +640,9 @@ dependencies = [
 
 [[package]]
 name = "rs-runec"
-version = "0.2.1"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd6af678e165104b9049e79e2c1dd3ea5d2d7bf99015c153c25f6d7007406bc4"
+checksum = "0130e3964d3c747c0ff9e228b0032b50ffe1eb59c34821760c85c7cbceee2f82"
 dependencies = [
  "clap",
  "tracing",
