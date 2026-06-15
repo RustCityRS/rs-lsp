@@ -76,6 +76,17 @@ class Rs2GotoDeclarationHandler : GotoDeclarationHandler {
             // Build the full entity name across colon (e.g. questlist:chompybird)
             val text = element.containingFile.text
             val fullEntity = buildFullEntityName(text, element.textOffset, word)
+            // dbtable column reference: table:column (e.g. consume_table:consumable).
+            // Columns are declared as `column=<name>,...` inside .dbtable files, never
+            // in a .pack — so when the column half is clicked, resolve it to that line.
+            if (fullEntity != word && fullEntity.contains(':')) {
+                val table = fullEntity.substringBefore(':')
+                val column = fullEntity.substringAfter(':')
+                if (word == column) {
+                    val colTarget = findDbColumnDefinition(table, column, baseDir, project)
+                    if (colTarget != null) return colTarget
+                }
+            }
             if (fullEntity != word) {
                 val result = findEntityDefinition(fullEntity, baseDir, project)
                 if (result != null) return result
@@ -107,6 +118,31 @@ class Rs2GotoDeclarationHandler : GotoDeclarationHandler {
         if (tokenType == Rs2TokenTypes.CONSTANT) {
             val name = word.trimStart('^')
             return findConstantDefinition(name, baseDir, project)
+        }
+
+        // RS2Config value references — an entity/constant/var name used as a
+        // value inside a config or pack file (e.g. `len2=chatshifty2`). Resolve
+        // it to its declaration, reusing the same lookups as .rs2 references.
+        if (tokenType == Rs2ConfigTokenTypes.IDENTIFIER) {
+            val text = element.containingFile.text
+            val fullEntity = buildFullEntityName(text, element.textOffset, word)
+            if (fullEntity != word && fullEntity.contains(':')) {
+                val column = fullEntity.substringAfter(':')
+                if (word == column) {
+                    findDbColumnDefinition(fullEntity.substringBefore(':'), column, baseDir, project)
+                        ?.let { return it }
+                }
+            }
+            if (fullEntity != word) {
+                findEntityDefinition(fullEntity, baseDir, project)?.let { return it }
+            }
+            return findEntityDefinition(word, baseDir, project)
+        }
+        if (tokenType == Rs2ConfigTokenTypes.CONSTANT) {
+            return findConstantDefinition(word.trimStart('^'), baseDir, project)
+        }
+        if (tokenType == Rs2ConfigTokenTypes.GAME_VAR) {
+            return findGameVarDefinition(word.trimStart('%'), baseDir, project)
         }
 
         return null
@@ -272,6 +308,43 @@ class Rs2GotoDeclarationHandler : GotoDeclarationHandler {
                     if (line.trimStart() == target) {
                         val offset = lines.take(index).sumOf { it.length + 1 } + line.indexOf('[')
                         return OffsetNavigatableElement(psiFile, offset)
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    private fun findDbColumnDefinition(table: String, column: String, baseDir: VirtualFile, project: Project): PsiElement? {
+        val contentDir = baseDir.findFileByRelativePath("content") ?: return null
+        return searchDbtableColumn(contentDir, project, table, column)
+    }
+
+    // Navigate a dbtable column reference (table:column) to its `column=<name>,...`
+    // declaration line inside the matching [table] section of a .dbtable file.
+    private fun searchDbtableColumn(dir: VirtualFile, project: Project, table: String, column: String): PsiElement? {
+        for (child in dir.children) {
+            if (child.isDirectory) {
+                val result = searchDbtableColumn(child, project, table, column)
+                if (result != null) return result
+            } else if (child.extension == "dbtable") {
+                val psiFile = PsiManager.getInstance(project).findFile(child) ?: continue
+                val text = psiFile.text
+                val lines = text.lines()
+                var inTable = false
+                for ((index, line) in lines.withIndex()) {
+                    val trimmed = line.trim()
+                    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+                        inTable = trimmed == "[$table]"
+                        continue
+                    }
+                    if (inTable && trimmed.startsWith("column=")) {
+                        val colName = trimmed.removePrefix("column=").substringBefore(',').trim()
+                        if (colName == column) {
+                            val colPos = line.indexOf(column)
+                            val offset = lines.take(index).sumOf { it.length + 1 } + (if (colPos >= 0) colPos else 0)
+                            return OffsetNavigatableElement(psiFile, offset)
+                        }
                     }
                 }
             }

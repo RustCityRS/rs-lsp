@@ -52,5 +52,11 @@
                 <option name="FOREGROUND" value="be84d1"/>
             </value>
         </option>
+        <!-- Config/pack assignment LHS (key / id) — red -->
+        <option name="RS2CFG_KEY">
+            <value>
+                <option name="FOREGROUND" value="ff6b68"/>
+            </value>
+        </option>
     </attributes>
 </scheme>
