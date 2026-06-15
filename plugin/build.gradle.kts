@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "rs2.lsp"
-version = "0.2.2"
+version = "0.3.0"
 
 repositories {
     mavenCentral()
@@ -33,5 +33,13 @@ tasks {
 
     publishPlugin {
         token.set(System.getenv("PUBLISH_TOKEN") ?: "")
+    }
+
+    runIde {
+        // RS2 `all.*` dump files (e.g. all.npc ~4 MB) exceed IntelliJ's default
+        // 2.5 MB intellisense limit, which disables PSI — and with it goto /
+        // find-usages — on those files. Raise it for sandbox testing. (End users
+        // set this via Help -> Edit Custom Properties; see the README.)
+        systemProperty("idea.max.intellisense.filesize", "20000")
     }
 }
