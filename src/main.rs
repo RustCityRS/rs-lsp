@@ -447,6 +447,15 @@ async fn init_registry(
     symloader::load_constant_files(&mut registry, &config_files);
     symloader::load_game_var_types(&mut registry, &config_files);
 
+    // Load dbtable column definitions so `table:column` references (e.g.
+    // `db_find(consume_table:consumable, …)`) resolve. Mirrors the real compile
+    // in rs-runec (lib.rs); without it the type checker reports every dbcolumn
+    // reference as an unresolved symbol.
+    let dbtable_ids = symloader::load_dbtable_pack(&pack_dir.join("dbtable.pack"));
+    if !dbtable_ids.is_empty() {
+        symloader::load_dbtable_configs(&mut registry, &config_files, &dbtable_ids);
+    }
+
     let engine_rs2 = scripts_dir.join("engine.rs2");
     if engine_rs2.exists() {
         symloader::load_engine_command_params(&mut registry, &engine_rs2);
