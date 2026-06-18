@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "rs2.lsp"
-version = "0.3.1"
+version = "0.3.0"
 
 repositories {
     mavenCentral()
