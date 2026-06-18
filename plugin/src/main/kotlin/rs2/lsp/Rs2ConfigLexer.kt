@@ -49,6 +49,19 @@ class Rs2ConfigLexer : LexerBase() {
     override fun getBufferEnd(): Int = endOffset
 
     override fun advance() {
+        advanceToken()
+        // Forward-progress guarantee. IntelliJ throws "Lexer is not advancing"
+        // (and the file then fails to open) if a token is produced without moving
+        // the offset. The logic below should never do that, but this backstops any
+        // future edit: degrade a stuck position to a single BAD char rather than
+        // freezing the editor.
+        if (tokenType != null && tokenEnd <= tokenStart) {
+            tokenEnd = tokenStart + 1
+            tokenType = Rs2ConfigTokenTypes.BAD
+        }
+    }
+
+    private fun advanceToken() {
         tokenStart = tokenEnd
         if (tokenStart >= endOffset) {
             tokenType = null
