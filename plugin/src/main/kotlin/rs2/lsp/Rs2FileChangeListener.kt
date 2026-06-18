@@ -9,14 +9,14 @@ import com.intellij.util.FileContentUtilCore
 
 class Rs2FileChangeListener : CommandListener {
     override fun commandFinished(event: CommandEvent) {
-        // Check if the command name suggests a rename or undo/redo
+        // Refresh only on definition-affecting commands. NOT on "Typing": that
+        // fires on essentially every keystroke and would wipe all registry caches
+        // (forcing a full re-scan of every pack/script on the next completion/
+        // annotate/inlay). Edits reach the registry on save via Rs2VfsListener.
         val name = event.commandName ?: ""
-        val isRelevant = name.contains("Rename") ||
-                name.contains("Undo") ||
-                name.contains("Redo") ||
-                name.contains("undo", ignoreCase = true) ||
-                name.contains("redo", ignoreCase = true) ||
-                name.contains("Typing")
+        val isRelevant = name.contains("Rename", ignoreCase = true) ||
+                name.contains("Undo", ignoreCase = true) ||
+                name.contains("Redo", ignoreCase = true)
 
         if (!isRelevant) return
 

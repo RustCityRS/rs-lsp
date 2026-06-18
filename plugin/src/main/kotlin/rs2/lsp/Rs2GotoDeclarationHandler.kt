@@ -2,14 +2,12 @@ package rs2.lsp
 
 import com.intellij.codeInsight.navigation.actions.GotoDeclarationHandler
 import com.intellij.openapi.editor.Editor
-import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.guessProjectDir
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiElement
-import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
-import com.intellij.psi.impl.FakePsiElement
+import com.intellij.psi.tree.IElementType
 
 class Rs2GotoDeclarationHandler : GotoDeclarationHandler {
     override fun getGotoDeclarationTargets(
@@ -18,9 +16,24 @@ class Rs2GotoDeclarationHandler : GotoDeclarationHandler {
         editor: Editor?
     ): Array<PsiElement>? {
         if (element == null) return null
+        val project = element.project
+
+        // RS2Config files: resolve straight from the editor document. Large `all.*`
+        // dumps exceed idea.max.intellisense.filesize, so they have no PSI tokens at
+        // the caret — but the declaration index and document text are size-independent.
+        val containingVFile = element.containingFile?.virtualFile
+        if (editor != null && containingVFile?.fileType is Rs2ConfigFileType) {
+            val text = editor.document.charsSequence
+            // Resolve references only; leave declarations to the PSI pipeline (small
+            // files) / the action wrapper (large files), where they show usages.
+            if (Rs2ConfigNav.declarationAtCaret(project, containingVFile, text, offset) == null) {
+                val target = Rs2ConfigNav.resolveReference(project, text, offset)
+                if (target != null) return arrayOf(target)
+            }
+        }
+
         val node = element.node ?: return null
         val tokenType = node.elementType
-        val project = element.project
 
         val word = element.text
         if (word.isBlank()) return null
@@ -39,12 +52,11 @@ class Rs2GotoDeclarationHandler : GotoDeclarationHandler {
             return null
         }
 
-        // Try to find definition
         val target = findDefinition(word, tokenType, project, element) ?: return null
         return arrayOf(target)
     }
 
-    private fun findDefinition(word: String, tokenType: com.intellij.psi.tree.IElementType, project: Project, element: PsiElement): PsiElement? {
+    private fun findDefinition(word: String, tokenType: IElementType, project: Project, element: PsiElement): PsiElement? {
         val baseDir = project.guessProjectDir() ?: return null
 
         // Script references → go to definition
@@ -63,9 +75,7 @@ class Rs2GotoDeclarationHandler : GotoDeclarationHandler {
             // Check for mesanim tag: <p,neutral> inside string interpolation
             val mesanimName = buildMesanimName(element)
             if (mesanimName != null) {
-                val result = findInConfigFiles(mesanimName, "mesanim", baseDir, project)
-                    ?: findEntityInSpecificPack(mesanimName, "mesanim", baseDir, project)
-                if (result != null) return result
+                Rs2ConfigNav.findEntity(project, mesanimName)?.let { return it }
             }
 
             val commands = Rs2CommandRegistry.getCommands(project)
@@ -75,16 +85,22 @@ class Rs2GotoDeclarationHandler : GotoDeclarationHandler {
 
             // Build the full entity name across colon (e.g. questlist:chompybird)
             val text = element.containingFile.text
-            val fullEntity = buildFullEntityName(text, element.textOffset, word)
+            val fullEntity = Rs2ConfigNav.buildFullEntityName(text, element.textOffset, word)
+            // dbtable column reference: table:column (e.g. consume_table:consumable).
+            if (fullEntity != word && fullEntity.contains(':')) {
+                val table = fullEntity.substringBefore(':')
+                val column = fullEntity.substringAfter(':')
+                if (word == column) {
+                    Rs2ConfigNav.findDbColumn(project, table, column)?.let { return it }
+                }
+            }
             if (fullEntity != word) {
-                val result = findEntityDefinition(fullEntity, baseDir, project)
-                if (result != null) return result
+                Rs2ConfigNav.findEntity(project, fullEntity)?.let { return it }
             }
 
             val entities = Rs2CommandRegistry.getEntities(project)
             if (word in entities) {
-                val result = findEntityDefinition(word, baseDir, project)
-                if (result != null) return result
+                Rs2ConfigNav.findEntity(project, word)?.let { return it }
             }
 
             // Could be a script name
@@ -99,14 +115,12 @@ class Rs2GotoDeclarationHandler : GotoDeclarationHandler {
 
         // Game variables — search in .varp/.varn/.vars/.varbit config and pack files
         if (tokenType == Rs2TokenTypes.GAME_VAR) {
-            val name = word.trimStart('%')
-            return findGameVarDefinition(name, baseDir, project)
+            return Rs2ConfigNav.findGameVar(project, word.trimStart('%'))
         }
 
         // Constants
         if (tokenType == Rs2TokenTypes.CONSTANT) {
-            val name = word.trimStart('^')
-            return findConstantDefinition(name, baseDir, project)
+            return Rs2ConfigNav.findConstant(project, word.trimStart('^'))
         }
 
         return null
@@ -179,104 +193,6 @@ class Rs2GotoDeclarationHandler : GotoDeclarationHandler {
             // Match [proc,name] or [label,name] or any [trigger,name]
             line.trimStart().startsWith("[") && line.contains(",$name]")
         }
-    }
-
-    private fun findConstantDefinition(name: String, baseDir: VirtualFile, project: Project): PsiElement? {
-        val scriptsDir = baseDir.findFileByRelativePath("content/scripts") ?: return null
-        return findInDirectoryRecursiveWithOffset(scriptsDir, project, "constant") { line ->
-            val trimmed = line.trim()
-            val key = trimmed.split('=').firstOrNull()?.trim()?.trimStart('^') ?: ""
-            if (key == name) {
-                val caretIdx = line.indexOf('^')
-                if (caretIdx >= 0) caretIdx else 0
-            } else -1
-        }
-    }
-
-    private fun findInDirectoryRecursiveWithOffset(dir: VirtualFile, project: Project, extension: String, matcher: (String) -> Int): PsiElement? {
-        for (child in dir.children) {
-            if (child.isDirectory) {
-                val result = findInDirectoryRecursiveWithOffset(child, project, extension, matcher)
-                if (result != null) return result
-            } else if (child.extension == extension) {
-                val psiFile = PsiManager.getInstance(project).findFile(child) ?: continue
-                val text = psiFile.text
-                val lines = text.lines()
-                for ((index, line) in lines.withIndex()) {
-                    val col = matcher(line)
-                    if (col >= 0) {
-                        val offset = lines.take(index).sumOf { it.length + 1 } + col
-                        return OffsetNavigatableElement(psiFile, offset)
-                    }
-                }
-            }
-        }
-        return null
-    }
-
-    private fun findEntityDefinition(name: String, baseDir: VirtualFile, project: Project): PsiElement? {
-        val packDir = baseDir.findFileByRelativePath("content/pack") ?: return findInPackFiles(name, baseDir, project)
-        for (packFile in packDir.children.filter { it.extension == "pack" }) {
-            val packText = packFile.inputStream.bufferedReader().readText()
-            val found = packText.lines().any { line ->
-                val eqIdx = line.indexOf('=')
-                eqIdx >= 0 && line.substring(eqIdx + 1).trim() == name
-            }
-            if (found) {
-                val configExt = configExtension(packFile.nameWithoutExtension)
-                val configResult = findInConfigFiles(name, configExt, baseDir, project)
-                if (configResult != null) return configResult
-                return findEntityInPackFile(name, packFile, project)
-            }
-        }
-        return findInPackFiles(name, baseDir, project)
-    }
-
-    private fun findGameVarDefinition(name: String, baseDir: VirtualFile, project: Project): PsiElement? {
-        val varPacks = listOf("varp", "varn", "vars", "varbit")
-        for (packType in varPacks) {
-            val packFile = baseDir.findFileByRelativePath("content/pack/$packType.pack") ?: continue
-            val result = findEntityInPackFile(name, packFile, project)
-            if (result != null) {
-                // Try config file first
-                val configExt = configExtension(packType)
-                val configResult = findInConfigFiles(name, configExt, baseDir, project)
-                return configResult ?: result
-            }
-        }
-        return null
-    }
-
-    private fun configExtension(packType: String): String = when (packType) {
-        "interface" -> "if"
-        "namedobj" -> "obj"
-        else -> packType
-    }
-
-    private fun findInConfigFiles(name: String, extension: String, baseDir: VirtualFile, project: Project): PsiElement? {
-        val contentDir = baseDir.findFileByRelativePath("content") ?: return null
-        return searchConfigRecursive(contentDir, project, extension, name)
-    }
-
-    private fun searchConfigRecursive(dir: VirtualFile, project: Project, extension: String, name: String): PsiElement? {
-        for (child in dir.children) {
-            if (child.isDirectory) {
-                val result = searchConfigRecursive(child, project, extension, name)
-                if (result != null) return result
-            } else if (child.extension == extension) {
-                val psiFile = PsiManager.getInstance(project).findFile(child) ?: continue
-                val text = psiFile.text
-                val lines = text.lines()
-                val target = "[$name]"
-                for ((index, line) in lines.withIndex()) {
-                    if (line.trimStart() == target) {
-                        val offset = lines.take(index).sumOf { it.length + 1 } + line.indexOf('[')
-                        return OffsetNavigatableElement(psiFile, offset)
-                    }
-                }
-            }
-        }
-        return null
     }
 
     fun findStringInterpolationTarget(element: PsiElement, cursorOffset: Int, project: Project): PsiElement? {
@@ -352,55 +268,6 @@ class Rs2GotoDeclarationHandler : GotoDeclarationHandler {
         return "${left!!.text},${right!!.text}"
     }
 
-    private fun findEntityInSpecificPack(name: String, packType: String, baseDir: VirtualFile, project: Project): PsiElement? {
-        val packFile = baseDir.findFileByRelativePath("content/pack/$packType.pack") ?: return null
-        return findEntityInPackFile(name, packFile, project)
-    }
-
-    private fun isEntityChar(c: Char): Boolean = c.isLetterOrDigit() || c == '_' || c == '+'
-
-    private fun buildFullEntityName(text: String, wordOffset: Int, word: String): String {
-        var start = wordOffset
-        var end = wordOffset + word.length
-        // Expand left across colon/plus+identifier
-        while (start > 0 && (text[start - 1] == ':' || text[start - 1] == '+')) {
-            var s = start - 2
-            while (s >= 0 && isEntityChar(text[s])) s--
-            start = s + 1
-        }
-        // Expand right across colon/plus+identifier
-        while (end < text.length && (text[end] == ':' || text[end] == '+')) {
-            var e = end + 1
-            while (e < text.length && isEntityChar(text[e])) e++
-            end = e
-        }
-        return text.substring(start, end)
-    }
-
-    private fun findInPackFiles(name: String, baseDir: VirtualFile, project: Project): PsiElement? {
-        val packDir = baseDir.findFileByRelativePath("content/pack") ?: return null
-        for (packFile in packDir.children.filter { it.extension == "pack" }) {
-            val result = findEntityInPackFile(name, packFile, project)
-            if (result != null) return result
-        }
-        return null
-    }
-
-    private fun findEntityInPackFile(name: String, packFile: VirtualFile, project: Project): PsiElement? {
-        val psiFile = PsiManager.getInstance(project).findFile(packFile) ?: return null
-        val text = psiFile.text
-        val lines = text.lines()
-        for ((index, line) in lines.withIndex()) {
-            val eqIdx = line.indexOf('=')
-            if (eqIdx < 0) continue
-            if (line.substring(eqIdx + 1).trim() != name) continue
-            val namePos = line.indexOf(name, eqIdx)
-            val offset = lines.take(index).sumOf { it.length + 1 } + (if (namePos >= 0) namePos else eqIdx + 1)
-            return OffsetNavigatableElement(psiFile, offset)
-        }
-        return null
-    }
-
     private fun findInFile(baseDir: VirtualFile, relativePath: String, searchText: String, project: Project): PsiElement? {
         val file = baseDir.findFileByRelativePath(relativePath) ?: return null
         return findLineInFile(file, project) { it.contains(searchText) }
@@ -431,31 +298,5 @@ class Rs2GotoDeclarationHandler : GotoDeclarationHandler {
             }
         }
         return null
-    }
-}
-
-private class OffsetNavigatableElement(
-    private val psiFile: PsiFile,
-    private val targetOffset: Int
-) : FakePsiElement() {
-    override fun getParent(): PsiElement = psiFile
-    override fun getContainingFile(): PsiFile = psiFile
-    override fun getTextOffset(): Int = targetOffset
-    override fun canNavigate(): Boolean = true
-    override fun canNavigateToSource(): Boolean = true
-    private val symbolName: String by lazy {
-        val text = psiFile.text
-        var end = targetOffset
-        while (end < text.length && (text[end].isLetterOrDigit() || text[end] == '_' || text[end] == '^' || text[end] == '+')) end++
-        if (targetOffset < text.length) text.substring(targetOffset, end) else psiFile.name
-    }
-    override fun getName(): String = symbolName
-    override fun getText(): String = symbolName
-    override fun getPresentation(): com.intellij.ide.projectView.PresentationData {
-        return com.intellij.ide.projectView.PresentationData(getName(), psiFile.virtualFile?.path ?: "", null, null)
-    }
-    override fun toString(): String = getName()
-    override fun navigate(requestFocus: Boolean) {
-        OpenFileDescriptor(psiFile.project, psiFile.virtualFile, targetOffset).navigate(requestFocus)
     }
 }

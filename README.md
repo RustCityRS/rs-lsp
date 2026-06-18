@@ -77,6 +77,52 @@ navigation, and rename.
 
 ---
 
+### Config & Pack File Support
+
+Beyond `.rs2` scripts, the plugin understands the **RuneScript 2 config and pack family** — the
+support files under `content/` that share a `[section]` + `key=value` grammar:
+
+- **Config files**: `.obj`, `.npc`, `.loc`, `.inv`, `.enum`, `.struct`, `.param`, `.dbtable`, `.dbrow`,
+  `.varp`/`.varn`/`.vars`/`.varbit`, `.seq`, `.spotanim`, `.mesanim`, `.hunt`, `.idk`, `.flo`/`.flu`,
+  `.anim`, and the numbered `.configNN` types
+- **Pack files**: `.pack`, `.order`, `.hashes`  •  **Constant files**: `.constant`
+- The generated `all.*` dumps under `content/scripts/_unpack/` (same grammar)
+
+#### Highlighting
+
+| Element                          | Color         | Example                              |
+|----------------------------------|---------------|--------------------------------------|
+| Section / declaration names      | Blue          | `[abyssal_whip]`, `[consume_table]`  |
+| Assignment LHS (key / pack id)   | Red           | `cost=`, `2dmodel=`, `24=`           |
+| Numbers / coords                 | Blue          | `120001`, `0_50_50_10_10`            |
+| Booleans                         | Keyword       | `members=yes`                        |
+| Entity references / pack values  | Purple        | `model=model_2595`, `0=abyssal_whip` |
+| `^constant` / `%var` references  | Purple italic | `^max_players`, `%quest`             |
+| Strings / comments               | Green / Gray  | `name="Abyssal whip"`, `// note`     |
+
+#### Navigation & Find Usages
+
+Config and pack entities are treated as real declarations:
+
+- **Section headers** (`[abyssal_whip]`) and **pack entries** (`0=abyssal_whip`) — Ctrl+click / Alt+F7
+  shows every usage across `.rs2` and config files
+- **Config value references** (e.g. `len2=chatshifty2`) — Ctrl+click jumps to that entity's declaration
+  (its `[section]` or pack entry)
+- **dbtable columns** — Ctrl+click `consumable` in `db_find(consume_table:consumable, ...)` resolves to its
+  `column=` line in the `.dbtable` file
+
+Find Usages matches identifier tokens only — words inside comments, strings, and `$locals` are excluded.
+
+> **Large `all.*` files:** IntelliJ disables semantic features (navigation, find usages) on files above its
+> intellisense size limit (2.5 MB by default), so big generated dumps like `all.npc` show highlighting but
+> not navigation. To enable it on those files, raise the limit via **Help → Edit Custom Properties**:
+>
+> ```
+> idea.max.intellisense.filesize=20000
+> ```
+
+---
+
 ### Hover Documentation
 
 Mouse over any symbol to see its declaration or config in a tooltip:

@@ -71,9 +71,35 @@ class Rs2Lexer : LexerBase() {
     override fun getBufferEnd(): Int = endOffset
 
     override fun advance() {
+        advanceToken()
+        // Forward-progress guarantee. IntelliJ throws "Lexer is not advancing"
+        // (and the file then fails to open) if a token is produced without moving
+        // the offset. The logic below should never do that, but this backstops any
+        // future edit: degrade a stuck position to a single fallback char rather
+        // than freezing the editor.
+        if (tokenType != null && tokenEnd <= tokenStart) {
+            tokenEnd = tokenStart + 1
+            tokenType = Rs2TokenTypes.CODE
+        }
+    }
+
+    private fun advanceToken() {
         tokenStart = tokenEnd
         if (tokenStart >= endOffset) {
             tokenType = null
+            return
+        }
+
+        // A newline always terminates string/interpolation state and returns to
+        // code context. Strings and <interpolations> never span lines, so an
+        // unterminated one ends here. Handling it up front also guarantees the
+        // lexer always advances: in string state (1) a leading '\n' would
+        // otherwise yield a zero-length token and stall IntelliJ's lexer
+        // ("Lexer is not advancing"), which prevents the file from opening.
+        if (buffer[tokenStart] == '\n') {
+            tokenEnd = tokenStart + 1
+            tokenType = Rs2TokenTypes.NEWLINE
+            state = 0
             return
         }
 
@@ -120,10 +146,6 @@ class Rs2Lexer : LexerBase() {
                 tokenEnd = tokenStart + 1
                 while (tokenEnd < endOffset && (buffer[tokenEnd] == ' ' || buffer[tokenEnd] == '\t' || buffer[tokenEnd] == '\r')) tokenEnd++
                 tokenType = Rs2TokenTypes.WHITESPACE
-            }
-            c == '\n' -> {
-                tokenEnd = tokenStart + 1
-                tokenType = Rs2TokenTypes.NEWLINE
             }
 
             // Comments

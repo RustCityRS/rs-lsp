@@ -24,6 +24,36 @@
                 language="RS2"
                 implementationClass="rs2.lsp.Rs2SyntaxHighlighterFactory"/>
 
+        <!-- Support files: config/pack family (highlighting only, no LSP). One
+             grammar ([section] + key=value / id=name / ^const) across every
+             config, pack, order, hashes and constant extension. -->
+        <fileType
+                name="RS2 Config"
+                implementationClass="rs2.lsp.Rs2ConfigFileType"
+                fieldName="INSTANCE"
+                language="RS2Config"
+                extensions="pack;order;hashes;constant;anim;bas;cursor;dbrow;dbtable;enum;flo;flu;hitmark;hunt;idk;inv;light;loc;mel;mesanim;msi;npc;obj;param;quest;seq;spotanim;struct;varbit;varclansetting;varp;varn;vars;if;synth;midi;jingle;model;stat;category;fontmetrics;overlayinterface;locshape;config7;config15;config18;config19;config20;config21;config22;config23;config24;config25;config37;config38;config39;config40;config41;config42;config43;config44;config45;config47;config48"/>
+
+        <lang.parserDefinition
+                language="RS2Config"
+                implementationClass="rs2.lsp.Rs2ConfigParserDefinition"/>
+
+        <lang.syntaxHighlighterFactory
+                language="RS2Config"
+                implementationClass="rs2.lsp.Rs2ConfigSyntaxHighlighterFactory"/>
+
+        <lang.findUsagesProvider
+                language="RS2Config"
+                implementationClass="rs2.lsp.Rs2ConfigFindUsagesProvider"/>
+
+        <!-- Size-independent index of config/pack declarations + a symbol
+             contributor so declarations inside large all.* dumps (which exceed
+             the PSI file-size limit) are navigable from Search Everywhere. -->
+        <fileBasedIndex implementation="rs2.lsp.Rs2ConfigDeclarationIndex"/>
+        <fileBasedIndex implementation="rs2.lsp.Rs2ReferenceIndex"/>
+
+        <gotoSymbolContributor implementation="rs2.lsp.Rs2ConfigSymbolContributor"/>
+
         <platform.lsp.serverSupportProvider
                 implementation="rs2.lsp.Rs2LspServerSupportProvider"/>
 
