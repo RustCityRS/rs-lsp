@@ -1971,17 +1971,9 @@ impl LanguageServer for Backend {
             }
 
             self.diagnose(&uri, &change.text).await;
-
-            // Re-diagnose other open documents for cross-file errors
-            let other_docs: Vec<(Url, String)> = self
-                .documents
-                .iter()
-                .filter(|e| e.key() != &uri)
-                .map(|e| (e.key().clone(), e.value().clone()))
-                .collect();
-            for (other_uri, other_text) in other_docs {
-                self.diagnose(&other_uri, &other_text).await;
-            }
+            // Other open docs are NOT re-diagnosed per keystroke (that was O(N)
+            // full passes per character). Cross-file diagnostics refresh on save —
+            // see the loop at the end of did_save.
         }
     }
 
@@ -2080,6 +2072,20 @@ impl LanguageServer for Backend {
                     }
                 }
             }
+        }
+        drop(reg_guard);
+
+        // Cross-file diagnostics: a save can change script signatures that other
+        // open files depend on. Refresh every open doc here (on save) instead of on
+        // every keystroke. diagnose() acquires registry.write(), so the read guard
+        // above must be dropped first to avoid a deadlock.
+        let open_docs: Vec<(Url, String)> = self
+            .documents
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+        for (doc_uri, doc_text) in open_docs {
+            self.diagnose(&doc_uri, &doc_text).await;
         }
     }
 
