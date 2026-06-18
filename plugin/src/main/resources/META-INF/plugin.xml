@@ -46,6 +46,14 @@
                 language="RS2Config"
                 implementationClass="rs2.lsp.Rs2ConfigFindUsagesProvider"/>
 
+        <!-- Size-independent index of config/pack declarations + a symbol
+             contributor so declarations inside large all.* dumps (which exceed
+             the PSI file-size limit) are navigable from Search Everywhere. -->
+        <fileBasedIndex implementation="rs2.lsp.Rs2ConfigDeclarationIndex"/>
+        <fileBasedIndex implementation="rs2.lsp.Rs2ReferenceIndex"/>
+
+        <gotoSymbolContributor implementation="rs2.lsp.Rs2ConfigSymbolContributor"/>
+
         <platform.lsp.serverSupportProvider
                 implementation="rs2.lsp.Rs2LspServerSupportProvider"/>
 

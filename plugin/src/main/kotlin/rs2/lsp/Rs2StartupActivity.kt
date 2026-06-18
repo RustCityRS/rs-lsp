@@ -18,9 +18,17 @@ class Rs2StartupActivity : ProjectActivity {
             // requires an explicit write-intent read action on the EDT.
             WriteIntentReadAction.run {
                 val am = ActionManager.getInstance()
-                val original = am.getAction("GotoDeclaration")
-                if (original != null && original !is Rs2GotoDeclarationWrapper) {
-                    am.replaceAction("GotoDeclaration", Rs2GotoDeclarationWrapper(original))
+                val gotoDecl = am.getAction("GotoDeclaration")
+                if (gotoDecl != null && gotoDecl !is Rs2GotoDeclarationWrapper) {
+                    am.replaceAction("GotoDeclaration", Rs2GotoDeclarationWrapper(gotoDecl))
+                }
+                // Lets Find Usages / Show Usages work from inside large RS2Config
+                // dumps (no PSI at the caret). Covers Alt+F7 and Ctrl+Alt+F7.
+                for (id in listOf("FindUsages", "ShowUsages")) {
+                    val action = am.getAction(id)
+                    if (action != null && action !is Rs2FindUsagesWrapper) {
+                        am.replaceAction(id, Rs2FindUsagesWrapper(action))
+                    }
                 }
             }
         }
