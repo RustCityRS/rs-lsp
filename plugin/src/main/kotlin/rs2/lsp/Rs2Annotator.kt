@@ -86,6 +86,7 @@ class Rs2Annotator : Annotator {
         val text = element.text
         val baseOffset = element.textRange.startOffset
         val commands = Rs2CommandRegistry.getCommands(element.project)
+        val entities = Rs2CommandRegistry.getEntities(element.project)
         var i = 0
         while (i < text.length) {
             if (text[i] == '<') {
@@ -125,7 +126,6 @@ class Rs2Annotator : Annotator {
                                 val wordStart = j
                                 while (j < argsStr.length && (argsStr[j].isLetterOrDigit() || argsStr[j] == '_')) j++
                                 val argWord = argsStr.substring(wordStart, j)
-                                val entities = Rs2CommandRegistry.getEntities(element.project)
                                 if (argWord in commands) {
                                     enforced(holder, TextRange(baseOffset + argsStart + wordStart, baseOffset + argsStart + j), Rs2SyntaxHighlighter.COMMAND_KEY)
                                 } else if (argWord in entities) {
