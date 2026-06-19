@@ -17,3 +17,4 @@ plugin/src/main/resources/bin/
 # OS
 .DS_Store
 Thumbs.db
+*.stackdump
