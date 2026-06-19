@@ -2880,6 +2880,34 @@ mod tests {
     }
 
     #[test]
+    fn testscript_marker_lexes_and_parses_cleanly() {
+        // The test-script feature relies on the lexer treating the `#testscript`
+        // marker as a comment. A runec regression that emitted a `Hash` token for
+        // `#` resurfaced as "Unexpected token: Hash '#'" on the marker line, so
+        // pin the behaviour here: the marker must never reach the parser as a token.
+        let cases = [
+            // marker mid-file, with scripts above and below
+            "[proc,foo](int $x)(int)\nreturn($x)\n\n#testscript\n\n[proc,test_foo]\n~foo(5)\n",
+            // marker at the very start of the file
+            "#testscript\n\n[proc,test_foo]\n~foo(5)\n",
+            // marker as the last line with no trailing newline
+            "[proc,foo](int $x)(int)\nreturn($x)\n#testscript",
+        ];
+        for (i, src) in cases.iter().enumerate() {
+            let path = PathBuf::from("test.rs2");
+            let mut lexer = Lexer::new(src, &path);
+            let toks = match lexer.tokenize() {
+                Ok(t) => t,
+                Err(e) => panic!("case {i}: LEX ERROR line {} col {}: {}", e.line, e.position, e.message),
+            };
+            let mut parser = Parser::new(toks, &path);
+            if let Err(e) = parser.parse() {
+                panic!("case {i}: PARSE ERROR line {} col {}: {}", e.line, e.position, e.message);
+            }
+        }
+    }
+
+    #[test]
     fn find_enclosing_header_scans_upward() {
         let lines = vec![
             "[proc,foo](obj $x)(int)",

@@ -10,6 +10,7 @@ import com.intellij.platform.lsp.api.LspServerManager
 class Rs2StartupActivity : ProjectActivity {
     override suspend fun execute(project: Project) {
         Rs2LspBinaryManager.getOrExtractBinary()
+        Rs2LspBinaryManager.registerUninstallCleanup()
         LspServerManager.getInstance(project)
             .stopAndRestartIfNeeded(Rs2LspServerSupportProvider::class.java)
 
